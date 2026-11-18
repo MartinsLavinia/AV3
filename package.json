@@ -1,0 +1,41 @@
+{
+  "name": "greencode-av3",
+  "version": "1.0.0",
+  "description": "API GreenCode para logística reversa — AV3",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "db:seed": "tsx prisma/seed.ts",
+    "test:journey": "tsx src/testeJornada.ts"
+  },
+  "repository": {
+    "type": "module",
+    "url": "git+https://github.com/MartinsLavinia/AV3.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/MartinsLavinia/AV3/issues"
+  },
+  "homepage": "https://github.com/MartinsLavinia/AV3#readme",
+  "dependencies": {
+    "@fastify/cors": "^11.3.1",
+    "@fastify/jwt": "^10.2.5",
+    "@prisma/adapter-pg": "^7.10.1",
+    "@prisma/client": "^7.10.1",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^18.0.8",
+    "fastify": "^5.12.7",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "prisma": "^7.10.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
