@@ -187,6 +187,7 @@ export class EquipamentoService {
   async alterarEstadoFisico(
     identificador: string,
     dados: DadosAlteracaoEstadoFisico,
+    responsavel: string,
   ) {
     if (!dados || typeof dados !== "object" || Array.isArray(dados)) {
       throw new ErroValidacaoEquipamento("O corpo da requisição deve ser um objeto JSON.");
@@ -199,6 +200,9 @@ export class EquipamentoService {
     if (typeof justificativa !== "string") throw new ErroValidacaoEquipamento("Justificativa deve ser um texto.");
 
     const atual = await this.obterParaAtualizar(identificador, versao);
+    if (dados.estadoFisico === atual.estadoFisico) {
+      throw new ErroValidacaoEquipamento("O equipamento já está no estado físico informado.");
+    }
     const estados = Object.values(EstadoFisico);
     const anterior = estados.indexOf(atual.estadoFisico);
     const novo = estados.indexOf(dados.estadoFisico);
@@ -211,6 +215,8 @@ export class EquipamentoService {
       versao,
       atual.estadoFisico,
       dados.estadoFisico,
+      responsavel,
+      justificativa.trim(),
     );
   }
 

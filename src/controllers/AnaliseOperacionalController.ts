@@ -6,7 +6,7 @@ export class AnaliseOperacionalController {
 
   gerarRelatorio = async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      const resultado = await this.analises.gerarRelatorio(request.query as Record<string, unknown>);
+      const resultado = await this.analises.gerarRelatorio(request.query as Record<string, unknown>, request.user.email);
       return reply.code(200).send(resultado);
     } catch (erro) {
       if (erro instanceof ErroValidacaoAnaliseOperacional) return reply.code(400).send({ mensagem: erro.message });

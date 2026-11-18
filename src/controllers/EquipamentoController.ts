@@ -114,6 +114,7 @@ export class EquipamentoController {
       const equipamento = await this.equipamentos.alterarEstadoFisico(
         identificador,
         request.body as DadosAlteracaoEstadoFisico,
+        request.user.email,
       );
       return reply.code(200).send({ mensagem: "Estado físico atualizado.", equipamento });
     } catch (erro) {

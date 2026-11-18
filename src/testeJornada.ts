@@ -210,6 +210,7 @@ async function executarJornada() {
   // Matriz de papéis para as áreas principais.
   const matriz = [
     ["/configuracoes", "ADMINISTRADOR"],
+    ["/referencias-recuperacao", "ADMINISTRADOR"],
     ["/usuarios", "ADMINISTRADOR"],
     ["/organizacoes", "OPERADOR_CADASTRO"],
     ["/contratos", "OPERADOR_CADASTRO"],
@@ -217,6 +218,10 @@ async function executarJornada() {
     ["/equipamentos", "GESTOR_ALMOXARIFADO"],
     ["/auditoria/historico", "AUDITOR"],
     ["/auditoria/relatorio", "AUDITOR"],
+    ["/analises/eficiencia-operacional", "AUDITOR"],
+    ["/analises/valor-recuperacao", "AUDITOR"],
+    ["/analises/vida-util-remanescente", "AUDITOR"],
+    ["/analises/execucoes", "AUDITOR"],
   ] as const;
   for (const [rota, papelPermitido] of matriz) {
     for (const papel of ["ADMINISTRADOR", "OPERADOR_CADASTRO", "GESTOR_ALMOXARIFADO", "AUDITOR"]) {
@@ -242,6 +247,62 @@ async function executarJornada() {
   });
   assert.equal(resposta.json().aliquotaImposto, 8.5);
   await requisitar("GET", "/configuracoes", 200, "administrador consulta configuração salva", { token: adminToken });
+
+  // Catálogo de referências: permissões, validação, revisão append-only e encerramento.
+  resposta = await requisitar("GET", "/referencias-recuperacao", 200, "administrador lista referências de recuperação", { token: adminToken });
+  assert.deepEqual(resposta.json().referencias, []);
+  await requisitar("POST", "/referencias-recuperacao", 403, "operador não cadastra referências de recuperação", {
+    token: tokens.OPERADOR_CADASTRO,
+    corpo: { tipo: "NOTEBOOK", estadoFisico: "BOM_ESTADO", valorEstimado: 300, fonte: "Teste", justificativa: "Teste" },
+  });
+  await requisitar("POST", "/referencias-recuperacao", 400, "valor com mais de duas casas decimais rejeitado", {
+    token: adminToken,
+    corpo: { tipo: "NOTEBOOK", estadoFisico: "BOM_ESTADO", valorEstimado: 300.123, fonte: "Cotação teste", justificativa: "Base de teste" },
+  });
+  resposta = await requisitar("POST", "/referencias-recuperacao", 201, "administrador cadastra referência específica", {
+    token: adminToken,
+    corpo: {
+      tipo: "NOTEBOOK",
+      estadoFisico: "BOM_ESTADO",
+      marca: "Apple",
+      modelo: "Air",
+      valorEstimado: 320,
+      fonte: "Cotação de demonstração",
+      justificativa: "Valor fornecido para validar a jornada.",
+    },
+  });
+  const referenciaId = resposta.json().referencia.id as string;
+  assert.equal(resposta.json().referencia.criadaPor, "admin@jornada.local");
+  await requisitar("POST", "/referencias-recuperacao", 409, "critérios ativos duplicados rejeitados sem diferenciar maiúsculas", {
+    token: adminToken,
+    corpo: {
+      tipo: "NOTEBOOK", estadoFisico: "BOM_ESTADO", marca: "APPLE", modelo: "air",
+      valorEstimado: 310, fonte: "Outra cotação", justificativa: "Duplicata intencional.",
+    },
+  });
+  resposta = await requisitar("POST", `/referencias-recuperacao/${referenciaId}/revisoes`, 201, "administrador cria nova versão sem sobrescrever anterior", {
+    token: adminToken,
+    corpo: { versao: 1, valorEstimado: 345.5, fonte: "Cotação revisada", justificativa: "Atualização da referência." },
+  });
+  const referenciaVersao2 = resposta.json().referencia;
+  assert.equal(referenciaVersao2.versao, 2);
+  assert.equal(referenciaVersao2.valorEstimado, "345.5");
+  assert.equal(referenciaVersao2.moeda, "BRL");
+  const referenciaVersao1 = await prisma!.referenciaRecuperacao.findUniqueOrThrow({ where: { id: referenciaId } });
+  assert.equal(referenciaVersao1.ativa, false);
+  assert.equal(referenciaVersao1.encerradaPor, "admin@jornada.local");
+  await requisitar("POST", `/referencias-recuperacao/${referenciaVersao2.id}/revisoes`, 409, "versão antiga de referência rejeitada", {
+    token: adminToken,
+    corpo: { versao: 1, valorEstimado: 360, fonte: "Cotação", justificativa: "Tentativa desatualizada." },
+  });
+  resposta = await requisitar("POST", `/referencias-recuperacao/${referenciaVersao2.id}/encerrar`, 200, "administrador encerra referência preservando histórico", {
+    token: adminToken,
+    corpo: { versao: 2, motivo: "Referência substituída para validar o encerramento." },
+  });
+  assert.equal(resposta.json().referencia.ativa, false);
+  assert.equal(resposta.json().referencia.encerradaPor, "admin@jornada.local");
+  resposta = await requisitar("GET", "/referencias-recuperacao", 200, "catálogo mantém versões encerradas para consulta", { token: adminToken });
+  assert.equal(resposta.json().referencias.length, 2);
 
   // Organização e contrato: CRUD, CNPJ, unicidade, versões e vínculos.
   const operador = tokens.OPERADOR_CADASTRO!;
@@ -388,11 +449,31 @@ async function executarJornada() {
     token: gestor,
     corpo: { estadoFisico: "DANIFICADO_GRAVE", versao: equipamento1Versao },
   });
+  assert.equal(await prisma!.historicoEstadoFisico.count({ where: { equipamentoId: equipamento1.id } }), 0);
+  verificacoes += 1;
+  console.log("[OK] tentativa inválida não cria histórico físico");
   resposta = await requisitar("PATCH", `/equipamentos/${equipamento1.id}/estado-fisico`, 200, "piora de estado com justificativa aceita", {
     token: gestor,
     corpo: { estadoFisico: "DANIFICADO_GRAVE", justificativa: "Dano constatado na inspeção", versao: equipamento1Versao },
   });
   let e1 = resposta.json().equipamento;
+  const eventoEstadoFisico = await prisma!.historicoEstadoFisico.findFirst({
+    where: { equipamentoId: equipamento1.id },
+  });
+  assert.ok(eventoEstadoFisico);
+  assert.equal(eventoEstadoFisico.estadoAnterior, "USADO_LEVE");
+  assert.equal(eventoEstadoFisico.estadoNovo, "DANIFICADO_GRAVE");
+  assert.equal(eventoEstadoFisico.responsavel, "gestor@jornada.local");
+  assert.equal(eventoEstadoFisico.justificativa, "Dano constatado na inspeção");
+  const versaoAposMudanca = e1.versao;
+  await requisitar("PATCH", `/equipamentos/${equipamento1.id}/estado-fisico`, 400, "estado físico sem mudança rejeitado", {
+    token: gestor,
+    corpo: { estadoFisico: "DANIFICADO_GRAVE", versao: versaoAposMudanca },
+  });
+  assert.equal(await prisma!.historicoEstadoFisico.count({ where: { equipamentoId: equipamento1.id } }), 1);
+  assert.equal((await prisma!.equipamento.findUniqueOrThrow({ where: { id: equipamento1.id } })).versao, versaoAposMudanca);
+  verificacoes += 1;
+  console.log("[OK] mudança de estado registra autoria e justificativa sem duplicar evento em no-op");
   resposta = await requisitar("POST", `/equipamentos/${e1.id}/triagem/iniciar`, 200, "iniciar triagem do equipamento 1", {
     token: gestor,
     corpo: { versao: e1.versao },
@@ -417,6 +498,102 @@ async function executarJornada() {
   e2 = resposta.json().equipamento;
   resposta = await requisitar("GET", `/lotes/${loteId}`, 200, "todos triados atualizam o lote", { token: gestor });
   assert.equal(resposta.json().statusProcessamento, "TRIAGEM_CONCLUIDA");
+
+  resposta = await requisitar("GET", "/analises/eficiencia-operacional", 200, "auditor gera análise de eficiência operacional", { token: tokens.AUDITOR });
+  const relatorioOperacional = resposta.json();
+  assert.ok(relatorioOperacional.lotes.some((lote: { loteId: string }) => lote.loteId === loteId));
+  const loteAnalisado = relatorioOperacional.lotes.find((lote: { loteId: string }) => lote.loteId === loteId);
+  assert.equal(loteAnalisado.equipamentos, 2);
+  assert.ok(relatorioOperacional.porOperador.some((item: { responsavel: string; equipamentosTriados: number }) => item.responsavel === "gestor@jornada.local" && item.equipamentosTriados === 2));
+  assert.equal(typeof relatorioOperacional.resumo.tempoMedianoHoras, "number");
+  assert.equal(typeof relatorioOperacional.resumo.desvioPadraoPopulacionalHoras, "number");
+  const agregadoOperador = relatorioOperacional.porOperador.find((item: { responsavel: string }) => item.responsavel === "gestor@jornada.local");
+  assert.equal(typeof agregadoOperador.duracaoMedianaTriagemHoras, "number");
+  assert.equal(typeof agregadoOperador.desvioPadraoPopulacionalTriagemHoras, "number");
+  const execucaoOperacional = await prisma!.execucaoAnalitica.findUniqueOrThrow({ where: { id: relatorioOperacional.execucaoAnaliticaId } });
+  assert.equal(execucaoOperacional.tipo, "EFICIENCIA_OPERACIONAL");
+  assert.equal(execucaoOperacional.quantidadeAmostras, relatorioOperacional.resumo.lotesConcluidos);
+  assert.equal(execucaoOperacional.solicitadoPor, "auditor@jornada.local");
+  assert.equal((execucaoOperacional.resultado as { lotes: Array<{ loteId: string }> }).lotes.some((lote) => lote.loteId === loteId), true);
+  resposta = await requisitar("GET", "/analises/execucoes?tipo=EFICIENCIA_OPERACIONAL&pagina=1&limite=10", 200, "auditor lista histórico filtrado de relatórios", { token: tokens.AUDITOR });
+  assert.ok(resposta.json().execucoes.some((item: { id: string }) => item.id === execucaoOperacional.id));
+  assert.equal("resultado" in resposta.json().execucoes[0], false);
+  resposta = await requisitar("GET", `/analises/execucoes/${execucaoOperacional.id}`, 200, "auditor consulta detalhe histórico do relatório", { token: tokens.AUDITOR });
+  assert.deepEqual(resposta.json().resultado, execucaoOperacional.resultado);
+  await requisitar("GET", `/analises/execucoes/${execucaoOperacional.id}`, 403, "gestor não consulta histórico analítico", { token: tokens.GESTOR_ALMOXARIFADO });
+  await requisitar("GET", `/analises/execucoes/${randomUUID()}`, 404, "execução histórica inexistente retorna não encontrado", { token: tokens.AUDITOR });
+  await requisitar("GET", "/analises/execucoes?limite=101", 400, "limite excessivo do histórico analítico rejeitado", { token: tokens.AUDITOR });
+  await requisitar("GET", "/analises/execucoes?dataInicio=2026-12-01&dataFim=2026-01-01", 400, "período invertido do histórico analítico rejeitado", { token: tokens.AUDITOR });
+  verificacoes += 1;
+  console.log("[OK] relatório operacional agrega, persiste e pode ser consultado no histórico");
+
+  resposta = await requisitar("GET", "/analises/vida-util-remanescente", 200, "auditor gera análise de vida útil remanescente", { token: tokens.AUDITOR });
+  const relatorioVidaUtil = resposta.json();
+  const vidaUtilEquipamento = relatorioVidaUtil.equipamentos.find((item: { equipamentoId: string }) => item.equipamentoId === e1.id);
+  assert.equal(vidaUtilEquipamento.previsao, null);
+  assert.equal(vidaUtilEquipamento.motivoSemPrevisao, "AMOSTRA_HISTORICA_INSUFICIENTE");
+
+  const historicoSinteticoVidaUtil = [
+    { estadoAnterior: EstadoFisico.USADO_LEVE, estadoNovo: EstadoFisico.USADO_MODERADO, dataHora: new Date("2023-01-01T00:00:00.000Z") },
+    { estadoAnterior: EstadoFisico.USADO_MODERADO, estadoNovo: EstadoFisico.DANIFICADO_LEVE, dataHora: new Date("2024-01-01T00:00:00.000Z") },
+    { estadoAnterior: EstadoFisico.DANIFICADO_LEVE, estadoNovo: EstadoFisico.DANIFICADO_GRAVE, dataHora: new Date("2025-01-01T00:00:00.000Z") },
+  ];
+  await prisma!.$transaction(async (tx) => {
+    await tx.equipamento.update({ where: { id: e2.id }, data: { estadoFisico: EstadoFisico.DANIFICADO_GRAVE } });
+    await tx.historicoEstadoFisico.createMany({
+      data: historicoSinteticoVidaUtil.map((evento) => ({
+        equipamentoId: e2.id,
+        ...evento,
+        responsavel: "gestor@jornada.local",
+        justificativa: "Série histórica determinística para testar regressão na jornada.",
+      })),
+    });
+  });
+  resposta = await requisitar("GET", "/analises/vida-util-remanescente", 200, "regressão calcula previsão com histórico suficiente", { token: tokens.AUDITOR });
+  const previsaoVidaUtil = resposta.json().equipamentos.find((item: { equipamentoId: string }) => item.equipamentoId === e2.id).previsao;
+  assert.ok(previsaoVidaUtil.anosEstimados > 0 && previsaoVidaUtil.anosEstimados < 2);
+  assert.ok(previsaoVidaUtil.coeficienteDeterminacao > 0.99);
+  const grupoVidaUtil = resposta.json().porTipo.find((item: { tipo: string }) => item.tipo === "MONITOR");
+  assert.equal(grupoVidaUtil.equipamentosComPrevisao, 1);
+  assert.equal(typeof grupoVidaUtil.vidaUtilMedianaAnosRestantes, "number");
+  assert.equal(grupoVidaUtil.desvioPadraoPopulacionalAnosRestantes, null);
+  verificacoes += 1;
+  console.log("[OK] simple-statistics prevê vida útil e resume a distribuição por tipo");
+  const execucaoVidaUtil = await prisma!.execucaoAnalitica.findUniqueOrThrow({ where: { id: relatorioVidaUtil.execucaoAnaliticaId } });
+  assert.equal(execucaoVidaUtil.tipo, "VIDA_UTIL_REMANESCENTE");
+  assert.equal(execucaoVidaUtil.solicitadoPor, "auditor@jornada.local");
+  verificacoes += 1;
+  console.log("[OK] análise de vida útil sinaliza amostra insuficiente e persiste execução");
+
+  await requisitar("POST", "/referencias-recuperacao", 201, "administrador cria referência exata para relatório de recuperação", {
+    token: adminToken,
+    corpo: {
+      tipo: "NOTEBOOK", estadoFisico: "DANIFICADO_GRAVE", marca: "Dell Jornada", modelo: "Modelo Jornada 1",
+      valorEstimado: 234, moeda: "BRL", fonte: "Cotação simulada para teste", justificativa: "Validação do nível de modelo exato.",
+    },
+  });
+  await requisitar("POST", "/referencias-recuperacao", 201, "administrador cria referência por marca para relatório de recuperação", {
+    token: adminToken,
+    corpo: {
+      tipo: "MONITOR", estadoFisico: "DANIFICADO_GRAVE", marca: "Samsung",
+      valorEstimado: 125, moeda: "BRL", fonte: "Cotação simulada para teste", justificativa: "Validação do nível de marca.",
+    },
+  });
+  resposta = await requisitar("GET", "/analises/valor-recuperacao", 200, "auditor gera análise de valor de recuperação", { token: tokens.AUDITOR });
+  const relatorioRecuperacao = resposta.json();
+  assert.equal(relatorioRecuperacao.resumo.equipamentosElegiveis, 2);
+  assert.equal(relatorioRecuperacao.resumo.equipamentosComReferencia, 2);
+  assert.equal(relatorioRecuperacao.resumo.equipamentosSemReferencia, 0);
+  assert.deepEqual(relatorioRecuperacao.resumo.valoresPorMoeda, [{ moeda: "BRL", valorTotalEstimado: "359.00", valorMedioPorEquipamentoComReferencia: "179.50", valorMedianoPorEquipamentoComReferencia: "179.50" }]);
+  assert.equal(relatorioRecuperacao.equipamentos.find((item: { equipamentoId: string }) => item.equipamentoId === e1.id).correspondencia.nivel, "MODELO_EXATO");
+  assert.equal(relatorioRecuperacao.equipamentos.find((item: { equipamentoId: string }) => item.equipamentoId === e2.id).correspondencia.nivel, "MARCA");
+  const execucaoRecuperacao = await prisma!.execucaoAnalitica.findUniqueOrThrow({ where: { id: relatorioRecuperacao.execucaoAnaliticaId } });
+  assert.equal(execucaoRecuperacao.tipo, "VALOR_RECUPERACAO");
+  assert.equal(execucaoRecuperacao.quantidadeAmostras, 2);
+  assert.equal(execucaoRecuperacao.solicitadoPor, "auditor@jornada.local");
+  assert.equal((execucaoRecuperacao.referenciasUsadas as unknown[]).length, 2);
+  verificacoes += 1;
+  console.log("[OK] relatório de recuperação aplica referências específicas e persiste snapshot com autoria");
 
   async function movimentar(id: string, destino: string, versao: number) {
     const movimento = await requisitar("POST", `/equipamentos/${id}/movimentacoes`, 201, `movimentar equipamento para ${destino}`, {
@@ -495,7 +672,7 @@ async function executarJornada() {
   const orgLivreVersaoAtual = (await prisma!.organizacao.findUniqueOrThrow({ where: { id: orgLivreId }, select: { versao: true } })).versao;
   await requisitar("DELETE", `/organizacoes/${orgLivreId}?versao=${orgLivreVersaoAtual}`, 204, "excluir organização sem dependências", { token: operador });
 
-  // Confere persistência das novas tabelas analíticas, sem implementar cálculos.
+  // Confere persistência das tabelas analíticas.
   const historicoFisico = await prisma!.historicoEstadoFisico.create({
     data: {
       equipamentoId: equipamento1.id,

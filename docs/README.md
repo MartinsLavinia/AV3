@@ -18,7 +18,12 @@ A arquitetura é um monólito modular: um processo Fastify organiza rotas, contr
 - Atualização transacional do processamento do lote e controle otimista de versão em entidades operacionais.
 - Consultas de rastreamento, histórico de movimentações e relatório geral para auditoria.
 - Histórico de início e conclusão da triagem e endpoint de eficiência operacional.
+- Relatório analítico de valor estimado de recuperação usando correspondência por modelo, marca ou referência geral.
+- Previsão analítica de vida útil remanescente por regressão linear sobre o histórico de estados físicos.
+- Consulta histórica de execuções analíticas com filtros, paginação e detalhe do snapshot.
+- Estatísticas descritivas e regressão linear dos relatórios usando `simple-statistics`, mantendo valores monetários em centavos exatos.
 - Estrutura Prisma para histórico físico, referências de recuperação versionadas e execuções analíticas.
+- Catálogo de referências de recuperação gerenciado pelo administrador, com revisão versionada e encerramento auditável.
 - Configurações globais de alíquota de imposto e coeficiente anual de depreciação.
 - Seed de demonstração opt-in e teste automatizado de jornada ponta a ponta.
 
@@ -40,6 +45,7 @@ O administrador é dedicado à gestão de contas e parâmetros. Cada rota de neg
 - Prisma ORM 7 com adaptador PostgreSQL
 - PostgreSQL
 - `bcryptjs` para hash de senhas
+- `simple-statistics` para estatística descritiva e regressão linear nos relatórios analíticos
 
 ## Estrutura do projeto
 

@@ -170,7 +170,7 @@ Para movimentação, envie `destino`, `versao` e, opcionalmente, `observacao`. O
 }
 ```
 
-Estados físicos: `NOVO`, `BOM_ESTADO`, `USADO_LEVE`, `USADO_MODERADO`, `DANIFICADO_LEVE`, `DANIFICADO_GRAVE`, `INSERVIVEL`. Mudanças mais distantes na escala exigem justificativa. A versão é obrigatória.
+Estados físicos: `NOVO`, `BOM_ESTADO`, `USADO_LEVE`, `USADO_MODERADO`, `DANIFICADO_LEVE`, `DANIFICADO_GRAVE`, `INSERVIVEL`. Mudanças mais distantes na escala exigem justificativa. A versão é obrigatória. Cada mudança aceita grava estado anterior/novo, data/hora, responsável autenticado e justificativa em `HistoricoEstadoFisico`, atomicamente com a atualização. Reenviar o estado atual é rejeitado e não cria evento.
 
 ## Configurações — administrador
 
@@ -188,6 +188,19 @@ Estados físicos: `NOVO`, `BOM_ESTADO`, `USADO_LEVE`, `USADO_MODERADO`, `DANIFIC
 
 Ambos aceitam números entre `0` e `100`. O patch exige ao menos um campo.
 
+## Referências de recuperação — administrador
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` | `/referencias-recuperacao` | Lista versões atuais e encerradas do catálogo. |
+| `POST` | `/referencias-recuperacao` | Cadastra uma referência ativa. |
+| `POST` | `/referencias-recuperacao/:id/revisoes` | Encerra a versão indicada e cria a próxima versão do mesmo critério. |
+| `POST` | `/referencias-recuperacao/:id/encerrar` | Encerra a referência sem apagá-la. |
+
+Todas as rotas exigem o papel `ADMINISTRADOR`. O corpo de criação inclui `tipo`, `estadoFisico`, `valorEstimado`, `fonte` e `justificativa`; `marca`, `modelo` e `moeda` são opcionais (`BRL` por padrão). O valor aceita até duas casas decimais e não pode ser negativo. Modelo específico exige marca. Referências gerais usam marca/modelo omitidos. Não pode haver duas referências ativas com os mesmos critérios, ignorando diferenças de maiúsculas/minúsculas.
+
+A revisão exige `versao`, novo `valorEstimado`, `fonte` e `justificativa`. Se `moeda` for omitida, mantém-se a moeda anterior. A referência antiga é encerrada com responsável e motivo da substituição, e uma nova linha recebe a versão seguinte. O encerramento exige `versao` e `motivo`. Não há exclusão física; conflitos de versão retornam `409`.
+
 ## Auditoria — auditor
 
 | Método | Rota | Descrição |
@@ -200,9 +213,24 @@ Ambos aceitam números entre `0` e `100`. O patch exige ao menos um campo.
 
 | Método | Rota | Descrição |
 |---|---|---|
-| `GET` | `/analises/eficiencia-operacional` | Calcula duração de triagem por lote, por equipamento/operador e por mês. |
+| `GET` | `/analises/eficiencia-operacional` | Calcula média, mediana e desvio padrão populacional dos tempos de triagem por lote, operador e mês; salva um snapshot histórico. |
+| `GET` | `/analises/valor-recuperacao` | Estima valores de recuperação para equipamentos em processamento, com detalhamento por tipo, estado, marca e modelo e mediana por grupo/moeda; salva um snapshot histórico. |
+| `GET` | `/analises/vida-util-remanescente` | Projeta quando equipamentos podem atingir `INSERVIVEL`, usando regressão linear do histórico de estados físicos; salva um snapshot histórico. |
 
-Filtros opcionais: `dataInicio` e `dataFim` no formato `AAAA-MM-DD` ou timestamp ISO UTC. A triagem de um equipamento é considerada concluída quando muda de `EM_TRIAGEM` para `AGUARDANDO_DESMONTE`. Um lote entra na análise após todos os seus equipamentos terem eventos de início e conclusão da triagem. O tempo do lote é calculado entre `dataEntrada` e a conclusão do último equipamento; o tempo por operador mede cada intervalo individual entre início e conclusão. Eventos anteriores à implantação da AV3 não são inferidos.
+Filtros opcionais: `dataInicio` e `dataFim` no formato `AAAA-MM-DD` ou timestamp ISO UTC; o recorte seleciona lotes pela data de entrada. A triagem de um equipamento é considerada concluída quando muda de `EM_TRIAGEM` para `AGUARDANDO_DESMONTE`. Um lote entra na análise após todos os seus equipamentos terem eventos de início e conclusão da triagem. O tempo do lote é calculado entre `dataEntrada` e a conclusão do último equipamento; o tempo por operador mede cada intervalo individual entre início e conclusão. O resumo, cada operador e cada mês informam quantidade, média, mediana e desvio padrão populacional em horas; a mediana reduz a influência de durações extremas e o desvio mostra a dispersão dos registros observados. Grupos sem observações retornam `null` para essas medidas. Cada resposta inclui `execucaoAnaliticaId`; o snapshot do resultado, parâmetros, período, versão do algoritmo, quantidade de amostras e auditor solicitante fica em `ExecucaoAnalitica`. Eventos anteriores à implantação da AV3 não são inferidos.
+
+O relatório de recuperação não recebe filtros. Considera equipamentos em `AGUARDANDO_TRIAGEM`, `EM_TRIAGEM`, `AGUARDANDO_DESMONTE` ou `EM_DESMONTE`; estados posteriores de reaproveitamento, reciclagem, descarte e baixa ficam fora para evitar dupla contagem potencial. Para cada equipamento, seleciona a referência ativa mais específica compatível: tipo + estado + marca + modelo exatos; depois tipo + estado + marca; por fim tipo + estado sem marca/modelo. Sem correspondência, lista o equipamento sem estimativa. Totais, médias e medianas são separados por moeda; média e mediana consideram apenas equipamentos com referência. A mediana descreve o centro dos valores estimados, mas não quantifica incerteza de mercado. A soma e a média monetária continuam calculadas em centavos inteiros para preservar precisão. O detalhamento inclui a fonte, versão e critério da referência. Esses valores são estimativas, não receita realizada. Apenas `AUDITOR` pode gerar os relatórios.
+
+A previsão de vida útil usa regressão linear simples da biblioteca `simple-statistics` por equipamento sobre o índice ordinal de estado físico (`NOVO` = 0 até `INSERVIVEL` = 6), com os eventos de `HistoricoEstadoFisico`. Só há projeção com pelo menos três eventos em datas distintas, sequência consistente e tendência positiva; o estado atual precisa coincidir com o último estado histórico. Projeções acima de 30 anos são omitidas. Para os demais casos, `motivoSemPrevisao` informa a limitação, em vez de inferir datas a partir de `anoFabricacao`. A resposta traz taxa de deterioração, R², horizonte estimado e data prevista, além de médias e medianas por tipo; também informa desvio padrão populacional quando há pelo menos duas projeções no tipo. Por ser extrapolação estatística de um histórico ainda limitado, a data é estimativa, não garantia de falha.
+
+### Histórico de relatórios analíticos — auditor
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` | `/analises/execucoes` | Lista execuções anteriores com paginação e filtros opcionais por tipo e período de geração. Retorna metadados, sem o JSON completo do resultado. |
+| `GET` | `/analises/execucoes/:id` | Consulta todos os metadados e o snapshot completo de uma execução específica. |
+
+As duas rotas são exclusivas do auditor. Na listagem, `pagina` inicia em 1 (padrão 1), `limite` vai de 1 a 100 (padrão 50), `tipo` aceita `EFICIENCIA_OPERACIONAL`, `VALOR_RECUPERACAO` ou `VIDA_UTIL_REMANESCENTE`, e `dataInicio`/`dataFim` filtram `geradoEm` em `AAAA-MM-DD` ou timestamp ISO UTC. A resposta inclui total e quantidade de páginas. A rota de detalhe retorna `404` quando o ID não existe e permite recuperar o resultado e as referências congeladas naquela execução, sem recalcular com dados ou parâmetros atuais.
 
 Antes de iniciar a aplicação AV3, configure `DATABASE_URL` para um banco PostgreSQL próprio da AV3 (não reutilize o banco da AV2) e aplique a migration com `npm exec -- prisma migrate deploy`; depois gere o cliente com `npm exec -- prisma generate`.
 

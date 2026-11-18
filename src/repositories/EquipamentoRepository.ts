@@ -170,6 +170,8 @@ export class EquipamentoRepository {
     versao: number,
     estadoAnterior: EstadoFisico,
     novoEstado: EstadoFisico,
+    responsavel: string,
+    justificativa: string,
   ) {
     return prisma.$transaction(async (tx) => {
       const resultado = await tx.equipamento.updateMany({
@@ -177,6 +179,15 @@ export class EquipamentoRepository {
         data: { estadoFisico: novoEstado, versao: { increment: 1 } },
       });
       if (resultado.count !== 1) await this.lancarConflitoOuNaoEncontrado(tx, id);
+      await tx.historicoEstadoFisico.create({
+        data: {
+          equipamentoId: id,
+          estadoAnterior,
+          estadoNovo: novoEstado,
+          responsavel,
+          justificativa,
+        },
+      });
       return tx.equipamento.findUniqueOrThrow({ where: { id } });
     });
   }

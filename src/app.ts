@@ -8,6 +8,10 @@ import { contratoRoutes } from "./routes/contratoRoutes.js";
 import { configuracaoRoutes } from "./routes/configuracaoRoutes.js";
 import { auditoriaRoutes } from "./routes/auditoriaRoutes.js";
 import { analiseOperacionalRoutes } from "./routes/analiseOperacionalRoutes.js";
+import { analiseRecuperacaoRoutes } from "./routes/analiseRecuperacaoRoutes.js";
+import { analiseVidaUtilRoutes } from "./routes/analiseVidaUtilRoutes.js";
+import { historicoAnaliticoRoutes } from "./routes/historicoAnaliticoRoutes.js";
+import { referenciaRecuperacaoRoutes } from "./routes/referenciaRecuperacaoRoutes.js";
 import { prisma } from "./infrastructure/prisma.js";
 
 export function criarAplicacao(logger = true): FastifyInstance {
@@ -26,6 +30,10 @@ export function criarAplicacao(logger = true): FastifyInstance {
   app.register(configuracaoRoutes);
   app.register(auditoriaRoutes);
   app.register(analiseOperacionalRoutes);
+  app.register(analiseRecuperacaoRoutes);
+  app.register(analiseVidaUtilRoutes);
+  app.register(historicoAnaliticoRoutes);
+  app.register(referenciaRecuperacaoRoutes);
 
   app.get("/", async () => ({ mensagem: "API GreenCode AV3 funcionando!" }));
   app.get("/teste-banco", async () => {

@@ -1,10 +1,11 @@
+import { mean, median, standardDeviation } from "simple-statistics";
 import { TipoEventoTriagem } from "../generated/prisma/enums.js";
 import { prisma } from "../infrastructure/prisma.js";
 
 export type FiltroAnaliseOperacional = { dataInicio?: Date; dataFim?: Date };
 
 export class AnaliseOperacionalRepository {
-  async gerarRelatorio(filtro: FiltroAnaliseOperacional) {
+  async gerarRelatorio(filtro: FiltroAnaliseOperacional, solicitadoPor: string) {
     const lotes = await prisma.lote.findMany({
       where: {
         ...(filtro.dataInicio || filtro.dataFim
@@ -69,24 +70,22 @@ export class AnaliseOperacionalRepository {
       }];
     });
 
-    const porOperadorMap = new Map<string, { triagensConcluidas: number; duracaoTotalHoras: number }>();
+    const porOperadorMap = new Map<string, { duracoesHoras: number[] }>();
     for (const evento of participacoes) {
-      const agregado = porOperadorMap.get(evento.responsavel) ?? { triagensConcluidas: 0, duracaoTotalHoras: 0 };
-      agregado.triagensConcluidas += 1;
-      agregado.duracaoTotalHoras += evento.duracaoHoras;
+      const agregado = porOperadorMap.get(evento.responsavel) ?? { duracoesHoras: [] };
+      agregado.duracoesHoras.push(evento.duracaoHoras);
       porOperadorMap.set(evento.responsavel, agregado);
     }
 
-    const porPeriodoMap = new Map<string, { lotesConcluidos: number; duracaoTotalHoras: number }>();
+    const porPeriodoMap = new Map<string, { duracoesHoras: number[] }>();
     for (const lote of concluidos) {
       const periodo = lote.triagemConcluidaEm.toISOString().slice(0, 7);
-      const agregado = porPeriodoMap.get(periodo) ?? { lotesConcluidos: 0, duracaoTotalHoras: 0 };
-      agregado.lotesConcluidos += 1;
-      agregado.duracaoTotalHoras += lote.duracaoHoras;
+      const agregado = porPeriodoMap.get(periodo) ?? { duracoesHoras: [] };
+      agregado.duracoesHoras.push(lote.duracaoHoras);
       porPeriodoMap.set(periodo, agregado);
     }
 
-    const somaHoras = concluidos.reduce((total, lote) => total + lote.duracaoHoras, 0);
+    const estatisticasLotes = resumirDuracoes(concluidos.map((lote) => lote.duracaoHoras));
     const eventosForaDoEscopo = await prisma.triagemEvento.count({
       where: {
         tipo: TipoEventoTriagem.CONCLUIDA,
@@ -96,7 +95,7 @@ export class AnaliseOperacionalRepository {
       },
     });
 
-    return {
+    const relatorio = {
       geradoEm: new Date(),
       criterio: "Duração do lote entre dataEntrada e a conclusão do último equipamento; apenas lotes com todos os equipamentos triados.",
       periodo: {
@@ -106,22 +105,60 @@ export class AnaliseOperacionalRepository {
       resumo: {
         lotesConcluidos: concluidos.length,
         eventosDeConclusaoRegistrados: eventosForaDoEscopo,
-        tempoMedioHoras: concluidos.length ? arredondar(somaHoras / concluidos.length) : null,
-        observacao: "Lotes legados sem eventos de triagem não entram nas métricas. Atribuição por operador inclui os responsáveis pelos eventos de conclusão dos equipamentos do lote.",
+        tempoMedioHoras: estatisticasLotes.mediaHoras,
+        tempoMedianoHoras: estatisticasLotes.medianaHoras,
+        desvioPadraoPopulacionalHoras: estatisticasLotes.desvioPadraoHoras,
+        observacao: "Média, mediana e desvio padrão populacional descrevem os lotes concluídos da amostra filtrada. Lotes legados sem eventos não entram; atribuição por operador usa o responsável pelo evento de conclusão de cada equipamento.",
       },
-      porOperador: [...porOperadorMap.entries()].map(([responsavel, valores]) => ({
-        responsavel,
-        equipamentosTriados: valores.triagensConcluidas,
-        duracaoMediaTriagemHoras: arredondar(valores.duracaoTotalHoras / valores.triagensConcluidas),
-      })).sort((a, b) => a.responsavel.localeCompare(b.responsavel)),
-      porPeriodo: [...porPeriodoMap.entries()].map(([mes, valores]) => ({
-        mes,
-        lotesConcluidos: valores.lotesConcluidos,
-        duracaoMediaHoras: arredondar(valores.duracaoTotalHoras / valores.lotesConcluidos),
-      })).sort((a, b) => a.mes.localeCompare(b.mes)),
+      porOperador: [...porOperadorMap.entries()].map(([responsavel, valores]) => {
+        const estatisticas = resumirDuracoes(valores.duracoesHoras);
+        return {
+          responsavel,
+          equipamentosTriados: valores.duracoesHoras.length,
+          duracaoMediaTriagemHoras: estatisticas.mediaHoras,
+          duracaoMedianaTriagemHoras: estatisticas.medianaHoras,
+          desvioPadraoPopulacionalTriagemHoras: estatisticas.desvioPadraoHoras,
+        };
+      }).sort((a, b) => a.responsavel.localeCompare(b.responsavel)),
+      porPeriodo: [...porPeriodoMap.entries()].map(([mes, valores]) => {
+        const estatisticas = resumirDuracoes(valores.duracoesHoras);
+        return {
+          mes,
+          lotesConcluidos: valores.duracoesHoras.length,
+          duracaoMediaHoras: estatisticas.mediaHoras,
+          duracaoMedianaHoras: estatisticas.medianaHoras,
+          desvioPadraoPopulacionalHoras: estatisticas.desvioPadraoHoras,
+        };
+      }).sort((a, b) => a.mes.localeCompare(b.mes)),
       lotes: concluidos,
     };
+
+    const execucao = await prisma.execucaoAnalitica.create({
+      data: {
+        tipo: "EFICIENCIA_OPERACIONAL",
+        geradoEm: relatorio.geradoEm,
+        ...(filtro.dataInicio ? { periodoInicio: filtro.dataInicio } : {}),
+        ...(filtro.dataFim ? { periodoFim: filtro.dataFim } : {}),
+        quantidadeAmostras: concluidos.length,
+        versaoAlgoritmo: "1.0.0",
+        parametros: JSON.parse(JSON.stringify(filtro)),
+        resultado: JSON.parse(JSON.stringify(relatorio)),
+        solicitadoPor,
+      },
+      select: { id: true },
+    });
+
+    return { ...relatorio, execucaoAnaliticaId: execucao.id };
   }
 }
 
 function arredondar(valor: number) { return Math.round(valor * 100) / 100; }
+
+function resumirDuracoes(valores: number[]) {
+  if (valores.length === 0) return { mediaHoras: null, medianaHoras: null, desvioPadraoHoras: null };
+  return {
+    mediaHoras: arredondar(mean(valores)),
+    medianaHoras: arredondar(median(valores)),
+    desvioPadraoHoras: arredondar(standardDeviation(valores)),
+  };
+}

@@ -60,6 +60,7 @@ async function popularBanco() {
     },
   ].map((referencia) => ({
     ...referencia,
+    assinaturaCriterio: `${referencia.tipo}|${referencia.estadoFisico}|*|*`.toLocaleLowerCase("pt-BR"),
     moeda: "BRL",
     fonte: "DADO FICTÍCIO DE DEMONSTRAÇÃO",
     justificativa: "Valor ilustrativo para validar o catálogo; não representa cotação nem valor de mercado.",
