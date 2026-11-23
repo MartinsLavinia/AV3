@@ -12,19 +12,15 @@ O repositório usa Prisma ORM 7 e contém migrações PostgreSQL. Não conecte e
 
 ## Opção recomendada: Docker Compose
 
-Na raiz do repositório, crie o arquivo de ambiente a partir do exemplo:
+Na raiz do repositório, copie `.env.example` e renomeie a cópia para `.env`. Isso pode ser feito pelo Explorador de Arquivos ou pelo gerenciador de arquivos do sistema; não é necessário executar um script para copiar o arquivo. Edite o `.env` recém-criado, mantendo o `.env.example` como modelo.
 
-```powershell
-if (!(Test-Path .env)) { Copy-Item .env.example .env }
-```
-
-Em Linux/macOS:
+`JWT_SECRET` deve ser uma chave aleatória mantida fora do controle de versão. Não reutilize a chave de exemplo em produção. Gere uma chave aleatória no terminal, dentro da pasta do projeto:
 
 ```bash
-test -f .env || cp .env.example .env
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-Edite `.env` e substitua `JWT_SECRET` por um segredo aleatório com pelo menos 32 caracteres. As credenciais PostgreSQL do exemplo são apenas para desenvolvimento local. Nunca compartilhe `.env` nem o segredo de uma chave de parceiro.
+Copie a chave gerada e cole no `.env`, substituindo o valor de exemplo. As credenciais PostgreSQL do exemplo são apenas para desenvolvimento local. Nunca compartilhe `.env` nem o segredo de uma chave de parceiro.
 
 Suba os serviços em segundo plano:
 

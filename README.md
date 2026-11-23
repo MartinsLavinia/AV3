@@ -6,11 +6,17 @@ API REST para logística reversa de equipamentos eletrônicos. O projeto evolui 
 
 Recomendado para desenvolvimento local: Windows 10+ com Docker Desktop e Docker Compose v2. O Compose sobe API, worker BullMQ, PostgreSQL e Redis.
 
-```powershell
-if (!(Test-Path .env)) { Copy-Item .env.example .env }
+Crie o arquivo `.env` copiando `.env.example` e renomeando a cópia para `.env`. Você pode fazer isso pelo Explorador de Arquivos; não é necessário executar um script para copiar o arquivo.
+
+`JWT_SECRET` deve ser uma chave aleatória mantida fora do controle de versão. Não reutilize a chave de exemplo em produção.
+
+Gere uma chave aleatória no terminal, dentro da pasta do projeto:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-Edite `.env` e configure `JWT_SECRET` com ao menos 32 caracteres aleatórios. Depois execute:
+Copie a chave gerada e cole no `.env`, substituindo o valor de exemplo. Depois execute:
 
 ```powershell
 docker compose up --build -d
