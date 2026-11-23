@@ -1,6 +1,7 @@
 
 import "dotenv/config";
 import { prisma } from "./infrastructure/prisma.js";
+import { filaAnalitica } from "./infrastructure/filaAnalitica.js";
 import { criarAplicacao } from "./app.js";
 
 const app = criarAplicacao();
@@ -19,6 +20,14 @@ async function encerrarServidor(sinal: NodeJS.Signals) {
     app.log.error(erro, "Erro ao fechar o servidor HTTP.");
     process.exitCode = 1;
   } finally {
+    try {
+      // A fila global mantém uma conexão Redis independente da instância HTTP.
+      await filaAnalitica.close();
+    } catch (erro) {
+      app.log.error(erro, "Erro ao fechar a fila analítica.");
+      process.exitCode = 1;
+    }
+
     // Desconecta do banco somente depois de encerrar as requisições.
     try {
       await prisma.$disconnect();
@@ -39,6 +48,9 @@ const iniciarServidor = async () => {
     process.once("SIGTERM", () => void encerrarServidor("SIGTERM"));
   } catch (erro) {
     app.log.error(erro);
+    await filaAnalitica.close().catch((erroFechamento) => {
+      app.log.error(erroFechamento, "Erro ao fechar a fila analítica após falha de inicialização.");
+    });
     await prisma.$disconnect();
     process.exitCode = 1;
   }

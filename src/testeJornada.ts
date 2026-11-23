@@ -1082,7 +1082,7 @@ async function verificarEncerramentoGracioso() {
   const porta = await escolherPortaLivre();
   const filho = spawn(
     process.execPath,
-    [resolve("node_modules/tsx/dist/cli.mjs"), "src/server.ts"],
+    [resolve("dist/server.js")],
     {
       cwd: process.cwd(),
       env: { ...process.env, PORT: String(porta) },
@@ -1095,6 +1095,22 @@ async function verificarEncerramentoGracioso() {
   const encerrado = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit) => {
     filho.once("exit", (code, signal) => resolveExit({ code, signal }));
   });
+  const aguardarSaida = async (limiteMs: number) => {
+    let temporizador: NodeJS.Timeout | undefined;
+    const resultado = await Promise.race([
+      encerrado,
+      new Promise<null>((resolveTimeout) => {
+        temporizador = setTimeout(() => resolveTimeout(null), limiteMs);
+      }),
+    ]);
+    if (temporizador) clearTimeout(temporizador);
+    return resultado;
+  };
+  const forcarSaida = async () => {
+    if (filho.exitCode !== null || filho.signalCode !== null) return;
+    filho.kill("SIGKILL");
+    await aguardarSaida(5000);
+  };
 
   let servidorRespondeu = false;
   for (let tentativa = 0; tentativa < 100; tentativa += 1) {
@@ -1111,18 +1127,15 @@ async function verificarEncerramentoGracioso() {
   }
   if (!servidorRespondeu) {
     filho.kill("SIGTERM");
-    await Promise.race([encerrado, new Promise((resolveWait) => setTimeout(resolveWait, 5000))]);
+    if (!(await aguardarSaida(5000))) await forcarSaida();
     throw new Error(`Servidor não iniciou para o teste de encerramento gracioso. Saída: ${saida}`);
   }
 
   filho.kill("SIGTERM");
-  const resultado = await Promise.race([
-    encerrado,
-    new Promise<null>((resolveTimeout) => setTimeout(() => resolveTimeout(null), 10000)),
-  ]);
+  const resultado = await aguardarSaida(10000);
   if (!resultado) {
-    filho.kill("SIGKILL");
-    throw new Error("Servidor não encerrou em 10 segundos após SIGTERM.");
+    await forcarSaida();
+    throw new Error(`Servidor não encerrou em 10 segundos após SIGTERM. Saída: ${saida}`);
   }
   assert.equal(resultado.code, 0, `Servidor encerrou com saída inesperada: ${saida}`);
   assert.ok(saida.includes("Encerrando servidor de forma graciosa."));
