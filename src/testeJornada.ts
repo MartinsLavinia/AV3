@@ -1,6 +1,6 @@
 import "dotenv/config";
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
@@ -18,6 +18,8 @@ const hostBanco = new URL(databaseUrlOriginal).hostname.toLowerCase();
 if (!["localhost", "127.0.0.1", "::1"].includes(hostBanco)) {
   throw new Error("Por segurança, o teste de jornada aceita somente PostgreSQL local; configure JOURNEY_DATABASE_URL.");
 }
+process.env.REDIS_URL ??= "redis://localhost:6380";
+process.env.ANALYTICS_QUEUE_NAME ??= `relatorios-jornada-${randomUUID()}`;
 
 const nomeSchema = `av3_jornada_${randomUUID().replaceAll("-", "")}`;
 const urlBase = new URL(databaseUrlOriginal);
@@ -28,6 +30,8 @@ const pool = new Pool({ connectionString: urlBase.toString() });
 const senhaTeste = "JornadaSegura@2026";
 const validadorCNPJ = new ValidadorCNPJ();
 let app: FastifyInstance | undefined;
+let worker: import("bullmq").Worker | undefined;
+let filaAnalitica: import("bullmq").Queue | undefined;
 let prisma: PrismaClient | undefined;
 let schemaCriado = false;
 let verificacoes = 0;
@@ -41,10 +45,12 @@ async function requisitar(
   url: string,
   esperado: number,
   descricao: string,
-  opcoes: { token?: string; corpo?: unknown } = {},
+  opcoes: { token?: string; apiKey?: string; corpo?: unknown; idempotencyKey?: string } = {},
 ): Promise<Resposta> {
   const headers: Record<string, string> = {};
   if (opcoes.token) headers.authorization = `Bearer ${opcoes.token}`;
+  if (opcoes.apiKey) headers["x-api-key"] = opcoes.apiKey;
+  if (opcoes.idempotencyKey) headers["idempotency-key"] = opcoes.idempotencyKey;
   if (opcoes.corpo !== undefined) headers["content-type"] = "application/json";
   const resposta = await (app!.inject({
     method: metodo,
@@ -123,19 +129,58 @@ async function executarJornada() {
   process.env.NODE_ENV = "test";
 
   console.log(`Schema de teste isolado criado: ${nomeSchema}`);
-  iniciarProcessoNode("node_modules/prisma/build/index.js", ["migrate", "deploy"]);
+  iniciarProcessoNode("node_modules/prisma/build/index.js", ["migrate", "deploy", "--config", "prisma7.config.ts"]);
 
   const banco = await import("./infrastructure/prisma.js");
   prisma = banco.prisma;
   const aplicacao = await import("./app.js");
   app = aplicacao.criarAplicacao(false);
   await app.ready();
+  const fila = await import("./infrastructure/filaAnalitica.js");
+  filaAnalitica = fila.filaAnalitica;
+  const workerAnalitico = await import("./worker.js");
+  worker = await workerAnalitico.iniciarWorker(false);
+
+  let resposta: Resposta;
+  resposta = await requisitar("GET", "/documentation/", 200, "Swagger UI está disponível");
+  resposta = await requisitar("GET", "/documentation/json", 200, "OpenAPI JSON está disponível");
+  const openapi = resposta.json();
+  assert.equal(openapi.openapi, "3.0.3");
+  const caminhosPublicos = [
+    ["/api/v1/public/equipamentos/{identificador}/rastreamento", "get"],
+    ["/api/v1/public/lotes", "post"],
+    ["/api/v1/public/relatorios", "post"],
+    ["/api/v1/public/relatorios/tarefas/{id}", "get"],
+    ["/api/v1/public/relatorios/tarefas/{id}/resultado", "get"],
+  ] as const;
+  for (const [caminho, metodo] of caminhosPublicos) {
+    const operacao = openapi.paths[caminho]?.[metodo];
+    assert.ok(operacao, `OpenAPI deve documentar ${metodo.toUpperCase()} ${caminho}`);
+    assert.ok(operacao.summary, `${metodo.toUpperCase()} ${caminho} deve ter resumo`);
+    assert.ok(operacao.tags?.includes("Parceiros v1"), `${metodo.toUpperCase()} ${caminho} deve estar no grupo de parceiros`);
+    assert.ok(operacao.security?.some((item: Record<string, unknown>) => "apiKeyAuth" in item), `${metodo.toUpperCase()} ${caminho} deve exigir chave de API`);
+  }
+  for (const [caminho, operacoes] of Object.entries(openapi.paths) as [string, Record<string, any>][]) {
+    for (const [metodo, operacao] of Object.entries(operacoes)) {
+      assert.ok(operacao.summary, `OpenAPI deve ter resumo para ${metodo.toUpperCase()} ${caminho}`);
+      assert.ok(operacao.tags?.length, `OpenAPI deve agrupar ${metodo.toUpperCase()} ${caminho}`);
+    }
+  }
+  for (const [caminho, metodo] of [["/auth/status", "get"], ["/auth/setup", "post"], ["/auth/login", "post"], ["/", "get"], ["/teste-banco", "get"]] as const) {
+    assert.ok(!openapi.paths[caminho][metodo].security?.length, `${metodo.toUpperCase()} ${caminho} não deve exigir autenticação`);
+  }
+  assert.ok(openapi.paths["/usuarios"].get.security?.some((item: Record<string, unknown>) => "bearerAuth" in item));
+  assert.equal(openapi.components.securitySchemes.apiKeyAuth.name, "x-api-key");
+  assert.ok(openapi.paths["/api/v1/public/relatorios"].post.responses["202"].content["application/json"].example);
+  assert.ok(openapi.paths["/api/v1/public/relatorios"].post.requestBody.content["application/json"].examples);
+  verificacoes += 1;
+  console.log("[OK] OpenAPI documenta todas as rotas, grupos, autenticação e exemplos públicos");
 
   await requisitar("GET", "/", 200, "endpoint de saúde responde");
   await requisitar("GET", "/teste-banco", 200, "endpoint confirma conexão com o banco");
 
   // Provisionamento, autenticação e autorização básica.
-  let resposta = await requisitar("GET", "/auth/status", 200, "setup começa necessário");
+  resposta = await requisitar("GET", "/auth/status", 200, "setup começa necessário");
   assert.equal(resposta.json().configuracaoInicialNecessaria, true);
   await requisitar("GET", "/organizacoes", 401, "rota protegida exige token");
   await requisitar("POST", "/auth/setup", 201, "provisionar administrador inicial", {
@@ -211,6 +256,7 @@ async function executarJornada() {
   const matriz = [
     ["/configuracoes", "ADMINISTRADOR"],
     ["/referencias-recuperacao", "ADMINISTRADOR"],
+    ["/chaves-api", "ADMINISTRADOR"],
     ["/usuarios", "ADMINISTRADOR"],
     ["/organizacoes", "OPERADOR_CADASTRO"],
     ["/contratos", "OPERADOR_CADASTRO"],
@@ -314,6 +360,69 @@ async function executarJornada() {
   resposta = await requisitar("POST", "/organizacoes", 201, "criar organização", { token: operador, corpo: orgBody });
   const orgId = resposta.json().id as string;
   const orgVersao1 = resposta.json().versao as number;
+
+  // Chaves de API externas: segredos de uso único, escopos e vínculo obrigatório à organização.
+  await requisitar("GET", "/chaves-api", 401, "gestão de chaves exige autenticação", {});
+  await requisitar("POST", `/organizacoes/${randomUUID()}/chaves-api`, 404, "não cria chave para organização inexistente", {
+    token: adminToken,
+    corpo: { nome: "Integração inexistente", permissoes: ["RASTREAMENTO_LEITURA"], expiraEm: dataFutura(1) },
+  });
+  await requisitar("POST", `/organizacoes/${orgId}/chaves-api`, 400, "escopo desconhecido rejeitado", {
+    token: adminToken,
+    corpo: { nome: "Integração inválida", permissoes: ["ADMINISTRADOR"], expiraEm: dataFutura(1) },
+  });
+  await requisitar("POST", `/organizacoes/${orgId}/chaves-api`, 400, "expiração passada rejeitada", {
+    token: adminToken,
+    corpo: { nome: "Integração vencida", permissoes: ["RASTREAMENTO_LEITURA"], expiraEm: dataPassada(1) },
+  });
+  resposta = await requisitar("POST", `/organizacoes/${orgId}/chaves-api`, 201, "administrador cria chave vinculada à organização", {
+    token: adminToken,
+    corpo: {
+      nome: "Integração de rastreamento",
+      permissoes: ["RASTREAMENTO_LEITURA", "RELATORIOS_LEITURA"],
+      expiraEm: dataFutura(1),
+    },
+  });
+  const chaveApi = resposta.json();
+  const valorChaveApi = chaveApi.chave as string;
+  assert.match(valorChaveApi, /^gc_live_[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
+  assert.equal(chaveApi.metadados.organizacaoId, orgId);
+  assert.equal(chaveApi.metadados.criadaPor, "admin@jornada.local");
+  const partesChaveApi = valorChaveApi.split(".");
+  const registroChaveApi = await prisma!.chaveApiParceiro.findUniqueOrThrow({ where: { id: chaveApi.metadados.id } });
+  assert.equal(registroChaveApi.segredoHash, createHash("sha256").update(partesChaveApi[1]!, "utf8").digest("hex"));
+  assert.equal(JSON.stringify(chaveApi).includes(registroChaveApi.segredoHash), false);
+  assert.equal(chaveApi.metadados.prefixo, `gc_live_${chaveApi.metadados.id.slice(0, 8)}`);
+  resposta = await requisitar("POST", `/organizacoes/${orgId}/chaves-api`, 201, "organização pode ter várias chaves independentes", {
+    token: adminToken,
+    corpo: { nome: "Integração de lotes", permissoes: ["LOTES_CRIACAO"], expiraEm: dataFutura(1) },
+  });
+  const chaveApiRenovadaAlvo = resposta.json();
+  await requisitar("GET", "/chaves-api", 403, "operador não gerencia chaves de parceiros", { token: tokens.OPERADOR_CADASTRO });
+  resposta = await requisitar("GET", `/chaves-api?organizacaoId=${orgId}`, 200, "administrador lista chaves sem revelar segredos", { token: adminToken });
+  assert.equal(resposta.json().chaves.length, 2);
+  assert.equal("segredoHash" in resposta.json().chaves[0], false);
+  assert.equal("chave" in resposta.json().chaves[0], false);
+  resposta = await requisitar("POST", `/chaves-api/${chaveApi.metadados.id}/revogar`, 200, "administrador revoga chave antes da expiração", {
+    token: adminToken,
+    corpo: { motivo: "Integração de rastreamento encerrada." },
+  });
+  assert.equal(resposta.json().chave.status, "REVOGADA");
+  await requisitar("POST", `/chaves-api/${chaveApi.metadados.id}/revogar`, 409, "revogação repetida retorna conflito", {
+    token: adminToken,
+    corpo: { motivo: "Tentativa repetida." },
+  });
+  resposta = await requisitar("POST", `/chaves-api/${chaveApiRenovadaAlvo.metadados.id}/renovar`, 201, "renovação cria novo segredo e revoga a chave anterior", {
+    token: adminToken,
+    corpo: { expiraEm: dataFutura(2) },
+  });
+  const novaChaveApi = resposta.json();
+  assert.notEqual(novaChaveApi.chave, chaveApiRenovadaAlvo.chave);
+  assert.deepEqual(novaChaveApi.metadados.permissoes, ["LOTES_CRIACAO"]);
+  assert.equal((await prisma!.chaveApiParceiro.findUniqueOrThrow({ where: { id: chaveApiRenovadaAlvo.metadados.id } })).revogadaEm !== null, true);
+  assert.equal((await prisma!.chaveApiParceiro.findUniqueOrThrow({ where: { id: novaChaveApi.metadados.id } })).organizacaoId, orgId);
+  verificacoes += 1;
+  console.log("[OK] chaves de parceiro têm escopos, expiração, revogação e renovação auditáveis");
   await requisitar("POST", "/organizacoes", 409, "CNPJ duplicado rejeitado", { token: operador, corpo: orgBody });
   await requisitar("GET", "/organizacoes", 200, "listar organizações", { token: operador });
   await requisitar("GET", `/organizacoes/${orgId}`, 200, "consultar organização", { token: operador });
@@ -340,6 +449,10 @@ async function executarJornada() {
     corpo: { ativo: false, versao: orgLivreVersao },
   });
   const orgLivreVersaoInativa = resposta.json().versao as number;
+  await requisitar("POST", `/organizacoes/${orgLivreId}/chaves-api`, 409, "não cria chave para organização inativa", {
+    token: adminToken,
+    corpo: { nome: "Integração inativa", permissoes: ["RASTREAMENTO_LEITURA"], expiraEm: dataFutura(1) },
+  });
   await requisitar("POST", "/contratos", 409, "contrato em organização inativa rejeitado", {
     token: operador,
     corpo: { organizacaoId: orgLivreId, dataVencimento: dataFutura(1), valorMensal: 100 },
@@ -595,6 +708,213 @@ async function executarJornada() {
   verificacoes += 1;
   console.log("[OK] relatório de recuperação aplica referências específicas e persiste snapshot com autoria");
 
+  // API pública: autenticação por chave, escopos, isolamento, relatórios organizacionais e rate limit.
+  await requisitar("GET", `/api/v1/public/equipamentos/${e1.codigoBarrasInterno}/rastreamento`, 401, "rota pública exige chave de API", {});
+  await requisitar("GET", `/api/v1/public/equipamentos/${e1.codigoBarrasInterno}/rastreamento`, 401, "chave revogada não autentica na API pública", { apiKey: chaveApi.chave });
+  const chaveComEscopoInadequado = novaChaveApi.chave as string;
+  await requisitar("GET", `/api/v1/public/equipamentos/${e1.codigoBarrasInterno}/rastreamento`, 403, "escopo de criação de lote não autoriza rastreamento", { apiKey: chaveComEscopoInadequado });
+  const chaveInvalida = `${chaveComEscopoInadequado.slice(0, -1)}${chaveComEscopoInadequado.endsWith("A") ? "B" : "A"}`;
+  await requisitar("GET", `/api/v1/public/equipamentos/${e1.codigoBarrasInterno}/rastreamento`, 401, "segredo incorreto rejeitado", { apiKey: chaveInvalida });
+  resposta = await requisitar("POST", `/organizacoes/${orgId}/chaves-api`, 201, "administrador cria chave com escopos públicos", {
+    token: adminToken,
+    corpo: {
+      nome: "Integração pública GreenCode",
+      permissoes: ["RASTREAMENTO_LEITURA", "LOTES_CRIACAO", "RELATORIOS_LEITURA"],
+      expiraEm: dataFutura(1),
+    },
+  });
+  const chavePublica = resposta.json().chave as string;
+  resposta = await requisitar("GET", `/api/v1/public/equipamentos/${e1.codigoBarrasInterno}/rastreamento`, 200, "parceiro consulta rastreamento próprio", { apiKey: chavePublica });
+  assert.equal(resposta.json().lote.organizacaoId, orgId);
+  const pedidos = [
+    { tipo: "EFICIENCIA_OPERACIONAL", filtros: { dataInicio: dataPassada(30) } },
+    { tipo: "VALOR_RECUPERACAO" },
+    { tipo: "VIDA_UTIL_REMANESCENTE" },
+  ];
+  const idsLotesParceiro = new Set((await prisma!.lote.findMany({ where: { organizacaoId: orgId }, select: { id: true } })).map((lote) => lote.id));
+  const tarefasParceiro: Array<{ id: string; tipo: string; idempotencyKey: string }> = [];
+  for (const pedido of pedidos) {
+    const chaveIdempotencia = `jornada-${pedido.tipo}-${randomUUID()}`;
+    resposta = await requisitar("POST", "/api/v1/public/relatorios", 202, `parceiro solicita ${pedido.tipo}`, {
+      apiKey: chavePublica, corpo: pedido, idempotencyKey: chaveIdempotencia,
+    });
+    const criado = resposta.json();
+    tarefasParceiro.push({ id: criado.tarefaId, tipo: pedido.tipo, idempotencyKey: chaveIdempotencia });
+    resposta = await requisitar("POST", "/api/v1/public/relatorios", 202, `${pedido.tipo} reenvio idempotente recupera tarefa`, {
+      apiKey: chavePublica, corpo: pedido, idempotencyKey: chaveIdempotencia,
+    });
+    assert.equal(resposta.json().tarefaId, criado.tarefaId);
+    assert.equal(resposta.json().repetida, true);
+    assert.equal(resposta.json().tarefaId, criado.tarefaId);
+  }
+  for (const tarefa of tarefasParceiro) {
+    const statusUrl = `/api/v1/public/relatorios/tarefas/${tarefa.id}`;
+    let status = "AGUARDANDO";
+    let ultimoStatus: { statusCode: number; body: string } | undefined;
+    for (let tentativa = 0; tentativa < 100 && status !== "CONCLUIDA" && status !== "FALHA"; tentativa += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const statusResposta = await app!.inject({ method: "GET", url: statusUrl, headers: { "x-api-key": chavePublica } }) as unknown as RespostaFastify;
+      ultimoStatus = { statusCode: statusResposta.statusCode, body: statusResposta.body };
+      if (statusResposta.statusCode === 200) status = statusResposta.json().status;
+      else break;
+    }
+    assert.equal(status, "CONCLUIDA", `${tarefa.tipo} deve terminar com sucesso. Última consulta: ${JSON.stringify(ultimoStatus)}`);
+    await requisitar("GET", statusUrl, 200, `${tarefa.tipo} status persistido pode ser consultado`, { apiKey: chavePublica });
+    resposta = await requisitar("GET", `${statusUrl}/resultado`, 200, `${tarefa.tipo} resultado fica disponível após conclusão`, { apiKey: chavePublica });
+    assert.equal(resposta.json().resultado.tipo ?? tarefa.tipo, tarefa.tipo);
+    if (tarefa.tipo === "EFICIENCIA_OPERACIONAL") assert.ok(resposta.json().resultado.lotes.every((lote: { loteId: string }) => idsLotesParceiro.has(lote.loteId)));
+    else assert.ok(resposta.json().resultado.equipamentos.every((equipamento: { equipamentoId: string }) => [e1.id, e2.id].includes(equipamento.equipamentoId)));
+  }
+  const organizacaoIsolamento = await requisitar("POST", "/organizacoes", 201, "criar organização ativa para testar isolamento das tarefas", {
+    token: operador, corpo: organizacao(cnpjValido(3), "isolamento-tarefas"),
+  });
+  const chaveOutraOrganizacaoResposta = await requisitar("POST", `/organizacoes/${organizacaoIsolamento.json().id}/chaves-api`, 201, "administrador cria chave para validar isolamento de tarefa", {
+    token: adminToken,
+    corpo: { nome: "Leitura de outra organização", permissoes: ["RELATORIOS_LEITURA"], expiraEm: dataFutura(1) },
+  });
+  const chaveOutraOrganizacao = chaveOutraOrganizacaoResposta.json().chave as string;
+  await requisitar("GET", `/api/v1/public/relatorios/tarefas/${tarefasParceiro[0]!.id}`, 404, "outra organização não pode consultar status da tarefa", { apiKey: chaveOutraOrganizacao });
+  await requisitar("GET", `/api/v1/public/relatorios/tarefas/${tarefasParceiro[0]!.id}/resultado`, 404, "outra organização não pode consultar resultado da tarefa", { apiKey: chaveOutraOrganizacao });
+  await requisitar("POST", "/api/v1/public/relatorios", 409, "Idempotency-Key reutilizada com parâmetros diferentes retorna conflito", {
+    apiKey: chavePublica, idempotencyKey: tarefasParceiro[0]!.idempotencyKey, corpo: pedidos[1],
+  });
+
+  // Job persistente continua aguardando quando o consumidor está parado e conclui após a retomada.
+  await worker!.close();
+  worker = undefined;
+  resposta = await requisitar("POST", "/api/v1/public/relatorios", 202, "parceiro enfileira tarefa enquanto o worker está parado", {
+    apiKey: chavePublica, idempotencyKey: `jornada-worker-restart-${randomUUID()}`, corpo: { tipo: "VALOR_RECUPERACAO" },
+  });
+  const tarefaRecuperacaoWorkerId = resposta.json().tarefaId as string;
+  const jobPendente = await filaAnalitica!.getJob(tarefaRecuperacaoWorkerId);
+  assert.ok(jobPendente);
+  assert.equal(await jobPendente!.getState(), "waiting");
+  await requisitar("GET", `/api/v1/public/relatorios/tarefas/${tarefaRecuperacaoWorkerId}/resultado`, 409, "resultado permanece indisponível enquanto o worker está parado", { apiKey: chavePublica });
+  worker = await workerAnalitico.iniciarWorker(false);
+  const tarefaRetomada = await aguardarStatusTarefa(tarefaRecuperacaoWorkerId, "CONCLUIDA", 10000);
+  assert.equal(tarefaRetomada.tentativas, 1);
+  resposta = await requisitar("GET", `/api/v1/public/relatorios/tarefas/${tarefaRecuperacaoWorkerId}/resultado`, 200, "job pendente conclui após reiniciar o worker", { apiKey: chavePublica });
+  assert.ok(resposta.json().execucaoAnaliticaId);
+  verificacoes += 2;
+  console.log("[OK] fila Redis preserva tarefa pendente durante parada do worker e a processa após retomada");
+
+  // Falhas transitórias controladas verificam o backoff de 3s + 5s e a conclusão na terceira tentativa.
+  await worker.close();
+  worker = undefined;
+  resposta = await requisitar("POST", "/api/v1/public/relatorios", 202, "enfileirar tarefa para testar retries transitórios", {
+    apiKey: chavePublica, idempotencyKey: `jornada-retry-ok-${randomUUID()}`, corpo: { tipo: "VIDA_UTIL_REMANESCENTE" },
+  });
+  const tarefaRetryId = resposta.json().tarefaId as string;
+  const instantesRetry: number[] = [];
+  let falhasTransitórias = 0;
+  worker = await workerAnalitico.iniciarWorker(false, async (tarefa, gerarRelatorio) => {
+    if (tarefa.id !== tarefaRetryId) return gerarRelatorio();
+    instantesRetry.push(Date.now());
+    falhasTransitórias += 1;
+    if (falhasTransitórias < 3) throw new Error("Falha transitória simulada pela jornada.");
+    return gerarRelatorio();
+  });
+  const tarefaRetryConcluida = await aguardarStatusTarefa(tarefaRetryId, "CONCLUIDA", 20000);
+  assert.equal(tarefaRetryConcluida.tentativas, 3);
+  assert.equal(instantesRetry.length, 3);
+  const esperaPrimeiroRetry = instantesRetry[1]! - instantesRetry[0]!;
+  const esperaSegundoRetry = instantesRetry[2]! - instantesRetry[1]!;
+  assert.ok(esperaPrimeiroRetry >= 2800 && esperaPrimeiroRetry < 10000, `primeiro retry aguardou ${esperaPrimeiroRetry}ms`);
+  assert.ok(esperaSegundoRetry >= 4800 && esperaSegundoRetry < 12000, `segundo retry aguardou ${esperaSegundoRetry}ms`);
+  resposta = await requisitar("GET", `/api/v1/public/relatorios/tarefas/${tarefaRetryId}/resultado`, 200, "tarefa se recupera e publica resultado após dois retries", { apiKey: chavePublica });
+  verificacoes += 4;
+  console.log(`[OK] retries transitórios: 3 tentativas, esperas de ${esperaPrimeiroRetry}ms e ${esperaSegundoRetry}ms`);
+
+  // Falha permanente após as três tentativas registra estado terminal e mensagem sanitizada.
+  await worker.close();
+  worker = undefined;
+  resposta = await requisitar("POST", "/api/v1/public/relatorios", 202, "enfileirar tarefa para testar falha terminal", {
+    apiKey: chavePublica, idempotencyKey: `jornada-retry-fail-${randomUUID()}`, corpo: { tipo: "EFICIENCIA_OPERACIONAL" },
+  });
+  const tarefaFalhaId = resposta.json().tarefaId as string;
+  let tentativasFalhaFinal = 0;
+  worker = await workerAnalitico.iniciarWorker(false, async (tarefa, gerarRelatorio) => {
+    if (tarefa.id !== tarefaFalhaId) return gerarRelatorio();
+    tentativasFalhaFinal += 1;
+    throw new Error("Erro interno simulado que não deve ser exposto ao parceiro.");
+  });
+  const tarefaFalhaFinal = await aguardarStatusTarefa(tarefaFalhaId, "FALHA", 20000);
+  assert.equal(tentativasFalhaFinal, 3);
+  assert.equal(tarefaFalhaFinal.tentativas, 3);
+  assert.equal(tarefaFalhaFinal.erro, "Falha temporária ao gerar relatório.");
+  resposta = await requisitar("GET", `/api/v1/public/relatorios/tarefas/${tarefaFalhaId}`, 200, "parceiro consulta estado terminal da tarefa", { apiKey: chavePublica });
+  assert.equal(resposta.json().status, "FALHA");
+  assert.equal(resposta.json().erro, "Falha temporária ao gerar relatório.");
+  await requisitar("GET", `/api/v1/public/relatorios/tarefas/${tarefaFalhaId}/resultado`, 409, "tarefa com falha final não publica resultado", { apiKey: chavePublica });
+  verificacoes += 3;
+  console.log("[OK] falha terminal persiste após 3 tentativas e não expõe erro interno");
+
+  // Verifica configuração dos schedulers e execução imediata pelo mesmo handler recorrente.
+  await worker.close();
+  worker = await workerAnalitico.iniciarWorker(false);
+  await workerAnalitico.registrarAgendamentosAnaliticos();
+  const schedulers = await filaAnalitica!.getJobSchedulers();
+  assert.equal(schedulers.length, 3);
+  assert.ok(schedulers.every((scheduler) => scheduler.pattern === "0 0 2 * * *" && scheduler.tz === "America/Sao_Paulo" && scheduler.name === "relatorio-agendado"));
+  const execucoesAgendadasAntes = await prisma!.execucaoAnalitica.count({ where: { solicitadoPor: "agendamento-analitico-diario" } });
+  await filaAnalitica!.add("relatorio-agendado", { tipo: "EFICIENCIA_OPERACIONAL" }, { jobId: `jornada-agendado-${randomUUID()}` });
+  await aguardarExecucaoAgendada(execucoesAgendadasAntes, 10000);
+  const execucaoAgendada = await prisma!.execucaoAnalitica.findFirst({
+    where: { solicitadoPor: "agendamento-analitico-diario" }, orderBy: { geradoEm: "desc" },
+  });
+  assert.ok(execucaoAgendada);
+  assert.equal(execucaoAgendada!.tipo, "EFICIENCIA_OPERACIONAL");
+  verificacoes += 3;
+  const execucoesCronAntes = await prisma!.execucaoAnalitica.count({ where: { solicitadoPor: "agendamento-analitico-diario" } });
+  await filaAnalitica!.upsertJobScheduler(
+    `jornada-disparo-minuto-${randomUUID()}`,
+    { pattern: "0 * * * * *", tz: "America/Sao_Paulo" },
+    { name: "relatorio-agendado", data: { tipo: "EFICIENCIA_OPERACIONAL" } },
+  );
+  await aguardarExecucaoAgendada(execucoesCronAntes, 75000);
+  verificacoes += 1;
+  console.log("[OK] 3 schedulers diários usam 02:00 America/Sao_Paulo; scheduler temporário disparou por cron");
+
+  resposta = await requisitar("POST", "/api/v1/public/lotes", 201, "parceiro submete lote para a organização vinculada à chave", {
+    apiKey: chavePublica,
+    corpo: { notaFiscal: "NF-PARCEIRO-001", transportadora: "Transportadora API", dataEntrada: dataPassada(1), observacoes: "Criado pela API pública." },
+  });
+  assert.equal(resposta.json().organizacaoId, orgId);
+  resposta = await requisitar("POST", "/api/v1/public/lotes", 201, "organização do lote vem da chave e ignora ID enviado pelo parceiro", {
+    apiKey: chavePublica,
+    corpo: { organizacaoId: orgLivreId, notaFiscal: "NF-FRAUDE", transportadora: "API", dataEntrada: dataPassada(1) },
+  });
+  assert.equal(resposta.json().organizacaoId, orgId);
+  const chaveExpiravelResposta = await requisitar("POST", `/organizacoes/${orgId}/chaves-api`, 201, "administrador cria chave para testar expiração automática", {
+    token: adminToken,
+    corpo: { nome: "Integração temporária", permissoes: ["RASTREAMENTO_LEITURA"], expiraEm: dataFutura(1) },
+  });
+  const chaveExpiravel = chaveExpiravelResposta.json();
+  await prisma!.chaveApiParceiro.update({ where: { id: chaveExpiravel.metadados.id }, data: { expiraEm: new Date(Date.now() - 1000) } });
+  await requisitar("GET", `/api/v1/public/equipamentos/${e1.codigoBarrasInterno}/rastreamento`, 401, "chave expirada deixa de autenticar automaticamente", { apiKey: chaveExpiravel.chave });
+  const respostaLimite = await requisitar("POST", `/organizacoes/${orgId}/chaves-api`, 201, "administrador cria chave para validar limite por parceiro", {
+    token: adminToken,
+    corpo: { nome: "Integração limite", permissoes: ["RASTREAMENTO_LEITURA"], expiraEm: dataFutura(1) },
+  });
+  const chaveLimite = respostaLimite.json().chave as string;
+  for (let i = 0; i < 60; i += 1) {
+    const respostaRateLimit: { statusCode: number } = await app!.inject({
+      method: "GET",
+      url: `/api/v1/public/equipamentos/${e1.codigoBarrasInterno}/rastreamento`,
+      headers: { "x-api-key": chaveLimite },
+    }) as unknown as { statusCode: number };
+    assert.equal(respostaRateLimit.statusCode, 200, `chamada ${i + 1} da janela deve ser permitida`);
+  }
+  const bloqueadaRateLimit: { statusCode: number; headers: Record<string, unknown> } = await app!.inject({
+    method: "GET",
+    url: `/api/v1/public/equipamentos/${e1.codigoBarrasInterno}/rastreamento`,
+    headers: { "x-api-key": chaveLimite },
+  }) as unknown as { statusCode: number; headers: Record<string, unknown> };
+  assert.equal(bloqueadaRateLimit.statusCode, 429);
+  assert.equal(bloqueadaRateLimit.headers["retry-after"] !== undefined, true);
+  verificacoes += 61;
+  console.log("[OK] limite de 60 requisições é compartilhado pela chave entre as rotas públicas e responde 429");
+
   async function movimentar(id: string, destino: string, versao: number) {
     const movimento = await requisitar("POST", `/equipamentos/${id}/movimentacoes`, 201, `movimentar equipamento para ${destino}`, {
       token: gestor,
@@ -660,9 +980,26 @@ async function executarJornada() {
     corpo: { ...loteBody, notaFiscal: "NF-JORNADA-VAZIO" },
   });
   await requisitar("DELETE", `/lotes/${resposta.json().id}?versao=${resposta.json().versao}`, 204, "excluir lote vazio", { token: gestor });
-  await requisitar("PATCH", `/organizacoes/${orgLivreId}`, 200, "reativar organização livre", {
+  resposta = await requisitar("PATCH", `/organizacoes/${orgLivreId}`, 200, "reativar organização livre", {
     token: operador,
     corpo: { ativo: true, versao: orgLivreVersaoInativa },
+  });
+  const orgLivreVersaoReativada = resposta.json().versao as number;
+  resposta = await requisitar("POST", `/organizacoes/${orgLivreId}/chaves-api`, 201, "administrador cria chave para organização parceira distinta", {
+    token: adminToken,
+    corpo: { nome: "Integração de outra organização", permissoes: ["RASTREAMENTO_LEITURA"], expiraEm: dataFutura(1) },
+  });
+  const chaveOutraOrganizacaoRastreamento = resposta.json().chave as string;
+  await requisitar("GET", `/api/v1/public/equipamentos/${e1.codigoBarrasInterno}/rastreamento`, 404, "chave de outra organização não revela equipamento alheio", { apiKey: chaveOutraOrganizacaoRastreamento });
+  resposta = await requisitar("PATCH", `/organizacoes/${orgLivreId}`, 200, "desativar organização suspende suas chaves públicas", {
+    token: operador,
+    corpo: { ativo: false, versao: orgLivreVersaoReativada },
+  });
+  const orgLivreVersaoDesativadaNovamente = resposta.json().versao as number;
+  await requisitar("GET", `/api/v1/public/equipamentos/${e1.codigoBarrasInterno}/rastreamento`, 401, "chave de organização inativa é rejeitada", { apiKey: chaveOutraOrganizacaoRastreamento });
+  await requisitar("PATCH", `/organizacoes/${orgLivreId}`, 200, "reativar organização após teste de isolamento", {
+    token: operador,
+    corpo: { ativo: true, versao: orgLivreVersaoDesativadaNovamente },
   });
   resposta = await requisitar("POST", "/contratos", 201, "criar contrato para testar exclusão", {
     token: operador,
@@ -670,7 +1007,7 @@ async function executarJornada() {
   });
   await requisitar("DELETE", `/contratos/${resposta.json().id}?versao=${resposta.json().versao}`, 204, "excluir contrato sem dependências", { token: operador });
   const orgLivreVersaoAtual = (await prisma!.organizacao.findUniqueOrThrow({ where: { id: orgLivreId }, select: { versao: true } })).versao;
-  await requisitar("DELETE", `/organizacoes/${orgLivreId}?versao=${orgLivreVersaoAtual}`, 204, "excluir organização sem dependências", { token: operador });
+  await requisitar("DELETE", `/organizacoes/${orgLivreId}?versao=${orgLivreVersaoAtual}`, 409, "organização com histórico de chave de API não pode ser excluída", { token: operador });
 
   // Confere persistência das tabelas analíticas.
   const historicoFisico = await prisma!.historicoEstadoFisico.create({
@@ -808,6 +1145,27 @@ async function escolherPortaLivre(): Promise<number> {
   return porta;
 }
 
+async function aguardarStatusTarefa(id: string, statusEsperado: string, limiteMs: number) {
+  const limite = Date.now() + limiteMs;
+  let tarefa = await prisma!.tarefaAnalitica.findUnique({ where: { id } });
+  while (tarefa?.status !== statusEsperado && Date.now() < limite) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    tarefa = await prisma!.tarefaAnalitica.findUnique({ where: { id } });
+  }
+  assert.equal(tarefa?.status, statusEsperado, `Tarefa ${id} ficou em ${tarefa?.status ?? "inexistente"}; esperado ${statusEsperado}.`);
+  return tarefa!;
+}
+
+async function aguardarExecucaoAgendada(contagemAnterior: number, limiteMs: number) {
+  const limite = Date.now() + limiteMs;
+  let contagem = await prisma!.execucaoAnalitica.count({ where: { solicitadoPor: "agendamento-analitico-diario" } });
+  while (contagem <= contagemAnterior && Date.now() < limite) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    contagem = await prisma!.execucaoAnalitica.count({ where: { solicitadoPor: "agendamento-analitico-diario" } });
+  }
+  assert.ok(contagem > contagemAnterior, "O worker não persistiu a execução analítica agendada dentro do prazo.");
+}
+
 async function main() {
   try {
     await executarJornada();
@@ -815,6 +1173,9 @@ async function main() {
     console.error("\nJornada falhou:", erro);
     process.exitCode = 1;
   } finally {
+    if (worker) await worker.close().catch((erro) => console.error("Erro fechando worker de teste:", erro));
+    if (filaAnalitica) await filaAnalitica.obliterate({ force: true }).catch((erro) => console.error("Erro limpando fila de teste:", erro));
+    if (filaAnalitica) await filaAnalitica.close().catch((erro) => console.error("Erro fechando fila analítica:", erro));
     if (app) await app.close().catch((erro) => console.error("Erro fechando Fastify:", erro));
     if (prisma) await prisma.$disconnect().catch((erro) => console.error("Erro desconectando Prisma:", erro));
     await pool.end();

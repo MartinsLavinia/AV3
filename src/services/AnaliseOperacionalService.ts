@@ -3,7 +3,7 @@ import { AnaliseOperacionalRepository, type FiltroAnaliseOperacional } from "../
 export class AnaliseOperacionalService {
   constructor(private readonly analises = new AnaliseOperacionalRepository()) {}
 
-  gerarRelatorio(query: Record<string, unknown>, solicitadoPor: string) {
+  gerarRelatorio(query: Record<string, unknown>, solicitadoPor: string, organizacaoId?: string, tarefaId?: string) {
     const dataInicio = this.dataValida(query.dataInicio, "dataInicio", false);
     const dataFim = this.dataValida(query.dataFim, "dataFim", true);
     if (dataInicio && dataFim && dataInicio > dataFim) {
@@ -13,7 +13,7 @@ export class AnaliseOperacionalService {
       ...(dataInicio ? { dataInicio } : {}),
       ...(dataFim ? { dataFim } : {}),
     };
-    return this.analises.gerarRelatorio(filtro, solicitadoPor);
+    return this.analises.gerarRelatorio(filtro, solicitadoPor, organizacaoId, tarefaId);
   }
 
   private dataValida(valor: unknown, nome: string, fimDoDia: boolean): Date | undefined {

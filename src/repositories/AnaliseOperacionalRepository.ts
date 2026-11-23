@@ -5,9 +5,10 @@ import { prisma } from "../infrastructure/prisma.js";
 export type FiltroAnaliseOperacional = { dataInicio?: Date; dataFim?: Date };
 
 export class AnaliseOperacionalRepository {
-  async gerarRelatorio(filtro: FiltroAnaliseOperacional, solicitadoPor: string) {
+  async gerarRelatorio(filtro: FiltroAnaliseOperacional, solicitadoPor: string, organizacaoId?: string, tarefaId?: string) {
     const lotes = await prisma.lote.findMany({
       where: {
+        ...(organizacaoId ? { organizacaoId } : {}),
         ...(filtro.dataInicio || filtro.dataFim
           ? { dataEntrada: { ...(filtro.dataInicio ? { gte: filtro.dataInicio } : {}), ...(filtro.dataFim ? { lte: filtro.dataFim } : {}) } }
           : {}),
@@ -89,6 +90,7 @@ export class AnaliseOperacionalRepository {
     const eventosForaDoEscopo = await prisma.triagemEvento.count({
       where: {
         tipo: TipoEventoTriagem.CONCLUIDA,
+        ...(organizacaoId ? { equipamento: { is: { lote: { is: { organizacaoId } } } } } : {}),
         ...(filtro.dataInicio || filtro.dataFim
           ? { dataHora: { ...(filtro.dataInicio ? { gte: filtro.dataInicio } : {}), ...(filtro.dataFim ? { lte: filtro.dataFim } : {}) } }
           : {}),
@@ -141,9 +143,10 @@ export class AnaliseOperacionalRepository {
         ...(filtro.dataFim ? { periodoFim: filtro.dataFim } : {}),
         quantidadeAmostras: concluidos.length,
         versaoAlgoritmo: "1.0.0",
-        parametros: JSON.parse(JSON.stringify(filtro)),
+        parametros: JSON.parse(JSON.stringify({ ...filtro, ...(organizacaoId ? { organizacaoId } : {}) })),
         resultado: JSON.parse(JSON.stringify(relatorio)),
         solicitadoPor,
+        ...(tarefaId ? { tarefaId } : {}),
       },
       select: { id: true },
     });

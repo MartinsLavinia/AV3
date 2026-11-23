@@ -1,8 +1,9 @@
 import { prisma } from "../infrastructure/prisma.js";
 
 export class AnaliseVidaUtilRepository {
-  obterEquipamentos() {
+  obterEquipamentos(organizacaoId?: string) {
     return prisma.equipamento.findMany({
+      where: organizacaoId ? { lote: { is: { organizacaoId } } } : {},
       select: {
         id: true,
         codigoBarrasInterno: true,
@@ -32,6 +33,7 @@ export class AnaliseVidaUtilRepository {
     resultado: unknown;
     solicitadoPor: string;
     parametros: unknown;
+    tarefaId?: string;
   }) {
     return prisma.execucaoAnalitica.create({
       data: {
@@ -42,6 +44,7 @@ export class AnaliseVidaUtilRepository {
         parametros: JSON.parse(JSON.stringify(dados.parametros)),
         resultado: JSON.parse(JSON.stringify(dados.resultado)),
         solicitadoPor: dados.solicitadoPor,
+        ...(dados.tarefaId ? { tarefaId: dados.tarefaId } : {}),
       },
       select: { id: true },
     });

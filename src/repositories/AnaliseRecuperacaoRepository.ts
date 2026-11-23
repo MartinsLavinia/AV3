@@ -1,10 +1,11 @@
 import { prisma } from "../infrastructure/prisma.js";
 
 export class AnaliseRecuperacaoRepository {
-  obterBaseCalculo() {
+  obterBaseCalculo(organizacaoId?: string) {
     return Promise.all([
       prisma.equipamento.findMany({
         where: {
+          ...(organizacaoId ? { lote: { is: { organizacaoId } } } : {}),
           statusRastreamento: {
             in: ["AGUARDANDO_TRIAGEM", "EM_TRIAGEM", "AGUARDANDO_DESMONTE", "EM_DESMONTE"],
           },
@@ -33,6 +34,8 @@ export class AnaliseRecuperacaoRepository {
     resultado: unknown;
     referenciasUsadas: unknown;
     solicitadoPor: string;
+    organizacaoId?: string;
+    tarefaId?: string;
   }) {
     return prisma.execucaoAnalitica.create({
       data: {
@@ -40,10 +43,15 @@ export class AnaliseRecuperacaoRepository {
         geradoEm: dados.geradoEm,
         quantidadeAmostras: dados.quantidadeAmostras,
         versaoAlgoritmo: "1.0.0",
-        parametros: { regraCorrespondencia: "MODELO_EXATO, MARCA, GERAL", moedasAgregadasSeparadamente: true },
+        parametros: {
+          regraCorrespondencia: "MODELO_EXATO, MARCA, GERAL",
+          moedasAgregadasSeparadamente: true,
+          ...(dados.organizacaoId ? { organizacaoId: dados.organizacaoId } : {}),
+        },
         resultado: JSON.parse(JSON.stringify(dados.resultado)),
         referenciasUsadas: JSON.parse(JSON.stringify(dados.referenciasUsadas)),
         solicitadoPor: dados.solicitadoPor,
+        ...(dados.tarefaId ? { tarefaId: dados.tarefaId } : {}),
       },
       select: { id: true },
     });

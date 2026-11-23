@@ -10,9 +10,10 @@ export type FiltroHistorico = {
 };
 
 export class AuditoriaRepository {
-  rastrearEquipamento(identificador: string) {
+  rastrearEquipamento(identificador: string, organizacaoId?: string) {
     return prisma.equipamento.findFirst({
       where: {
+        ...(organizacaoId ? { lote: { is: { organizacaoId } } } : {}),
         OR: [
           ...(UUID.test(identificador) ? [{ id: identificador }] : []),
           { codigoBarrasInterno: identificador },

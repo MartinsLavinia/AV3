@@ -31,8 +31,8 @@ type Previsao = {
 export class AnaliseVidaUtilService {
   constructor(private readonly analises = new AnaliseVidaUtilRepository()) {}
 
-  async gerarRelatorio(solicitadoPor: string) {
-    const equipamentos = await this.analises.obterEquipamentos();
+  async gerarRelatorio(solicitadoPor: string, organizacaoId?: string, tarefaId?: string) {
+    const equipamentos = await this.analises.obterEquipamentos(organizacaoId);
     const linhas = equipamentos.map((equipamento) => {
       const analise = analisarEquipamento(equipamento);
       const previsao = analise.previsao;
@@ -114,7 +114,8 @@ export class AnaliseVidaUtilService {
       quantidadeAmostras: equipamentos.length,
       resultado: relatorio,
       solicitadoPor,
-      parametros,
+      parametros: { ...parametros, ...(organizacaoId ? { organizacaoId } : {}) },
+      ...(tarefaId ? { tarefaId } : {}),
     });
 
     return { ...relatorio, execucaoAnaliticaId: execucao.id };

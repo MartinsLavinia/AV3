@@ -10,8 +10,8 @@ type Agregado = { equipamentosElegiveis: number; equipamentosComReferencia: numb
 export class AnaliseRecuperacaoService {
   constructor(private readonly analises = new AnaliseRecuperacaoRepository()) {}
 
-  async gerarRelatorio(solicitadoPor: string) {
-    const [equipamentos, referencias] = await this.analises.obterBaseCalculo();
+  async gerarRelatorio(solicitadoPor: string, organizacaoId?: string, tarefaId?: string) {
+    const [equipamentos, referencias] = await this.analises.obterBaseCalculo(organizacaoId);
     const referenciasAtivas = referencias.map((referencia) => ({ referencia, moeda: referencia.moeda.toUpperCase() }));
     const usadas = new Map<string, Referencia>();
     const linhas = equipamentos.map((equipamento) => {
@@ -115,6 +115,8 @@ export class AnaliseRecuperacaoService {
       resultado: relatorio,
       referenciasUsadas,
       solicitadoPor,
+      ...(organizacaoId ? { organizacaoId } : {}),
+      ...(tarefaId ? { tarefaId } : {}),
     });
 
     return { ...relatorio, execucaoAnaliticaId: execucao.id };

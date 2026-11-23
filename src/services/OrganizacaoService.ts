@@ -119,8 +119,8 @@ export class OrganizacaoService {
     } catch (erro) {
       if (erro instanceof OrganizacaoNaoEncontradaRepositoryError) throw new OrganizacaoNaoEncontradaError();
       if (erro instanceof VersaoOrganizacaoConflitanteRepositoryError) throw new VersaoOrganizacaoConflitanteError();
-      if (erro instanceof OrganizacaoComVinculosRepositoryError) throw new OrganizacaoComVinculosError(erro.lotes, erro.contratos);
-      if (erro instanceof Prisma.PrismaClientKnownRequestError && erro.code === "P2003") throw new OrganizacaoComVinculosError(0, 1);
+      if (erro instanceof OrganizacaoComVinculosRepositoryError) throw new OrganizacaoComVinculosError(erro.lotes, erro.contratos, erro.chavesApi);
+      if (erro instanceof Prisma.PrismaClientKnownRequestError && erro.code === "P2003") throw new OrganizacaoComVinculosError(0, 0, 1);
       throw erro;
     }
   }
@@ -172,7 +172,7 @@ export class CnpjOrganizacaoDuplicadoError extends Error {}
 export class OrganizacaoNaoEncontradaError extends Error {}
 export class VersaoOrganizacaoConflitanteError extends Error {}
 export class OrganizacaoComVinculosError extends Error {
-  constructor(public readonly lotes: number, public readonly contratos: number) { super(); }
+  constructor(public readonly lotes: number, public readonly contratos: number, public readonly chavesApi: number = 0) { super(); }
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

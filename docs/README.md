@@ -1,97 +1,74 @@
-# GreenCode API — AV3
+# Guia de desenvolvimento e operação
 
-API RESTful para apoiar a logística reversa de equipamentos eletrônicos da GreenCode. Esta entrega evolui o sistema de linha de comando (CLI) desenvolvido na AV1 para um servidor HTTP com persistência relacional, autenticação por token e operações acessíveis a diferentes clientes.
+Este guia cobre configuração local, inicialização, migrações, teste integrado e operação do GreenCode AV3. A API é um backend REST/JSON; a interface Swagger serve para explorar e testar os endpoints, mas não é um frontend de negócio.
 
-## Objetivo e escopo
+## Requisitos
 
-A API permite registrar organizações clientes e contratos de coleta, receber lotes, cadastrar e acompanhar equipamentos, registrar movimentações e consultar informações de auditoria. A AV3 parte do backend monolítico implementado na AV2 e amplia o projeto com análises operacionais e a estrutura para o catálogo de referências e histórico de resultados analíticos.
+- Node.js 22 e npm.
+- Docker Desktop com Docker Compose v2 no Windows, ou Docker Engine e Compose v2 em Ubuntu 24.04.03+.
+- Se executar sem Docker: PostgreSQL 16 e Redis 7 acessíveis localmente.
 
-A arquitetura é um monólito modular: um processo Fastify organiza rotas, controllers, serviços e repositórios, e o Prisma persiste os dados em PostgreSQL. Essa divisão facilita entender, testar e evoluir o sistema sem introduzir a complexidade operacional de microsserviços.
+O repositório usa Prisma ORM 7 e contém migrações PostgreSQL. Não conecte este projeto aos bancos da AV2.
 
-## Funcionalidades
+## Opção recomendada: Docker Compose
 
-- Configuração inicial de um administrador e login com senha protegida por bcrypt e JWT.
-- Autorização por papel para administradores, operadores de cadastro, gestores de almoxarifado e auditores.
-- CRUD de usuários, organizações, contratos, lotes e equipamentos, respeitando as permissões e vínculos do domínio.
-- Validação de CNPJ, campos obrigatórios, enums, datas e regras de negócio; unicidade também é protegida no banco.
-- Triagem de equipamentos, transições de rastreamento, movimentações e alteração do estado físico.
-- Atualização transacional do processamento do lote e controle otimista de versão em entidades operacionais.
-- Consultas de rastreamento, histórico de movimentações e relatório geral para auditoria.
-- Histórico de início e conclusão da triagem e endpoint de eficiência operacional.
-- Relatório analítico de valor estimado de recuperação usando correspondência por modelo, marca ou referência geral.
-- Previsão analítica de vida útil remanescente por regressão linear sobre o histórico de estados físicos.
-- Consulta histórica de execuções analíticas com filtros, paginação e detalhe do snapshot.
-- Estatísticas descritivas e regressão linear dos relatórios usando `simple-statistics`, mantendo valores monetários em centavos exatos.
-- Estrutura Prisma para histórico físico, referências de recuperação versionadas e execuções analíticas.
-- Catálogo de referências de recuperação gerenciado pelo administrador, com revisão versionada e encerramento auditável.
-- Configurações globais de alíquota de imposto e coeficiente anual de depreciação.
-- Seed de demonstração opt-in e teste automatizado de jornada ponta a ponta.
-
-## Papéis e permissões
-
-| Papel | Responsabilidades permitidas |
-|---|---|
-| `ADMINISTRADOR` | Criar, consultar, editar e excluir contas; consultar e alterar configurações globais. |
-| `OPERADOR_CADASTRO` | Criar, consultar, editar e excluir organizações e contratos. |
-| `GESTOR_ALMOXARIFADO` | Criar, consultar, editar e excluir lotes e equipamentos; executar triagem, movimentações e atualização do estado físico. |
-| `AUDITOR` | Consultar rastreamento e histórico de movimentações e gerar relatório; não altera dados. |
-
-O administrador é dedicado à gestão de contas e parâmetros. Cada rota de negócio exige o papel correspondente; ter um token válido, por si só, não concede acesso a todas as funções.
-
-## Tecnologias
-
-- Node.js e TypeScript
-- Fastify 5 e `@fastify/jwt`
-- Prisma ORM 7 com adaptador PostgreSQL
-- PostgreSQL
-- `bcryptjs` para hash de senhas
-- `simple-statistics` para estatística descritiva e regressão linear nos relatórios analíticos
-
-## Estrutura do projeto
-
-```text
-prisma/       schema, migrações e seed
-src/
-  controllers/  entrada HTTP e respostas
-  domain/       validadores de domínio
-  infrastructure/ conexão Prisma/PostgreSQL
-  plugins/      autenticação e autorização
-  repositories/ persistência e consultas
-  routes/       métodos, caminhos e validação de entrada
-  services/     regras de negócio
-  testeJornada.ts
-```
-
-## Como executar localmente
-
-Requisitos: Node.js, npm e PostgreSQL local. Crie um banco vazio e copie `.env.example` para `.env`, ajustando as credenciais:
-
-```env
-DATABASE_URL="postgresql://usuario:senha@localhost:5432/greencode_av3?schema=public"
-JWT_SECRET="uma-chave-aleatoria-com-pelo-menos-32-caracteres"
-PORT=3000
-```
-
-`JWT_SECRET` deve ser uma chave aleatória mantida fora do controle de versão. Não reutilize a chave de exemplo em produção.
-
-Gere uma chave aleatória no terminal, dentro da pasta do projeto:
+Na raiz do repositório, crie o arquivo de ambiente a partir do exemplo:
 
 ```powershell
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Copie a chave gerada e cole no .env
-
-
-Instale dependências, gere o cliente Prisma e aplique as migrações:
+Em Linux/macOS:
 
 ```bash
-npm install
-npm exec -- prisma generate
-npm exec -- prisma migrate deploy
+test -f .env || cp .env.example .env
 ```
 
-Inicie em desenvolvimento ou compile e inicie a versão de produção:
+Edite `.env` e substitua `JWT_SECRET` por um segredo aleatório com pelo menos 32 caracteres. As credenciais PostgreSQL do exemplo são apenas para desenvolvimento local. Nunca compartilhe `.env` nem o segredo de uma chave de parceiro.
+
+Suba os serviços em segundo plano:
+
+```powershell
+docker compose up --build -d
+docker compose ps -a
+```
+
+O Compose inicializa PostgreSQL 16, Redis 7, a migração e a API e worker em containers separados. São criados os bancos `AV3` e `AV3TESTES`; as portas publicadas são `3000` para API, `5433` para PostgreSQL e `6380` para Redis, limitadas à máquina local. O serviço `migrate` pode aparecer como `Exited (0)`: isso significa que aplicou as migrações e terminou normalmente.
+
+Para logs e encerramento:
+
+```powershell
+docker compose logs -f api worker
+docker compose down
+```
+
+Os volumes preservam PostgreSQL e Redis ao parar os containers. `docker compose down -v` apaga esses volumes e os dados locais; use somente se a intenção for realmente limpar o ambiente.
+
+## Execução sem Docker
+
+Crie bancos locais vazios `AV3` e `AV3TESTES`; configure a URL de cada banco no `.env`. Defina também `REDIS_URL`, `JWT_SECRET` e, se necessário, `PORT` e `ANALYTICS_WORKER_CONCURRENCY`.
+
+Exemplo para desenvolvimento local:
+
+```env
+DATABASE_URL="postgresql://usuario:senha@localhost:5432/AV3?schema=public"
+JOURNEY_DATABASE_URL="postgresql://usuario:senha@localhost:5432/AV3TESTES?schema=public"
+REDIS_URL="redis://localhost:6379"
+JWT_SECRET="segredo-aleatorio-de-pelo-menos-32-caracteres"
+PORT=3000
+ANALYTICS_WORKER_CONCURRENCY=2
+SEED_DEMO_DATA=false
+```
+
+Instale, gere o cliente Prisma e aplique as migrações:
+
+```bash
+npm ci
+npm exec -- prisma generate --config prisma7.config.ts
+npm exec -- prisma migrate deploy --config prisma7.config.ts
+```
+
+Em terminais separados, inicie API e worker:
 
 ```bash
 npm run dev
@@ -99,39 +76,64 @@ npm run dev
 
 ```bash
 npm run build
-npm start
+npm run start:worker
 ```
 
-Por padrão, a API escuta na porta `3000`; `PORT` permite configurar outra. `GET /` verifica a aplicação e `GET /teste-banco` verifica a conexão com o banco.
+`npm start` inicia a API compilada. O worker é um processo necessário para relatórios de parceiros e schedulers; sem ele, relatórios ficam aguardando na fila.
 
-### Primeiro acesso
+## Primeira configuração da API
 
-Consulte `GET /auth/status`. Se ainda não houver administrador, envie `POST /auth/setup` com `nomeCompleto`, `email` e `senha` (mínimo de 8 caracteres). Esse cadastro é de uso único. Depois, faça login em `POST /auth/login`; envie o JWT recebido como `Authorization: Bearer <token>` nas rotas protegidas. O token expira em 30 minutos.
+Depois de iniciar a API, acesse:
+
+- API: <http://localhost:3000>
+- Swagger UI: <http://localhost:3000/documentation>
+- OpenAPI JSON: <http://localhost:3000/documentation/json>
+- Saúde básica: `GET /`
+- Conexão PostgreSQL: `GET /teste-banco`
+
+Consulte `GET /auth/status`. Se não houver administrador cadastrado, faça o provisionamento único por `POST /auth/setup` com nome, e-mail e senha. Depois autentique por `POST /auth/login`; use o JWT como `Authorization: Bearer <token>`. O token expira em 30 minutos. O seed não cria administrador.
 
 ## Teste de jornada
 
-O comando `npm run test:journey` inicia uma jornada de integração contra um schema PostgreSQL temporário. Configure `JOURNEY_DATABASE_URL` no `.env` para apontar a uma instância local de desenvolvimento/teste; se não estiver definida, o script usa `DATABASE_URL`. O host é limitado a `localhost`, `127.0.0.1` ou `::1`. O usuário do banco precisa poder criar e remover schemas. O teste aplica migrações e remove apenas o schema aleatório criado por ele; não limpa o schema `public`.
+Configure `JOURNEY_DATABASE_URL` apontando para um PostgreSQL **local de desenvolvimento/teste** e `REDIS_URL` para um Redis local. A jornada recusa hosts remotos. O usuário do PostgreSQL precisa criar e remover schemas.
 
-## Seed demonstrativo
+```bash
+npm run build
+npm run test:journey
+```
 
-O seed é opcional e deve ser usado somente em banco de desenvolvimento. Habilite `SEED_DEMO_DATA=true` no `.env` e execute `npm run db:seed`. Ele cria dados de exemplo para operador, gestor e auditor, além de organização, contrato, lote, equipamentos e movimentação. Não cria administrador: use o endpoint de configuração inicial.
+O teste cria um schema aleatório, aplica nele as migrações e remove somente esse schema ao final. Não aponta a URL de jornada para produção. A bateria cobre fluxos internos, relatórios, API pública, isolamento entre organizações, idempotência, retries, parada/retomada do worker e scheduler; uma execução local recente no Windows passou com 324 verificações. No Windows, a verificação de encerramento do processo com `SIGTERM` é ignorada porque esse sinal não é entregue ao filho como em Unix.
 
-As contas `operador.demo@greencode.local`, `gestor.demo@greencode.local` e `auditor.demo@greencode.local` usam a senha `GreenCode@2026`. Reexecutar o seed redefine senha e papel dessas contas; troque as credenciais ou remova os registros antes de compartilhar o ambiente.
+O workflow [testes-linux.yml](../.github/workflows/testes-linux.yml) executa build e jornada no runner Ubuntu 24.04 com PostgreSQL e Redis como serviços. Consulte a aba **Actions** do GitHub para verificar o resultado do commit que será entregue.
 
-## Documentação complementar
+## Seed de demonstração
 
-- [Referência da API](API.md): rotas, permissões, corpos de requisição e respostas esperadas.
-- [Decisões técnicas e regras de negócio](DECISOES_TECNICAS.md): justificativas, trade-offs e comportamentos adotados.
+O seed é somente para desenvolvimento e é opt-in:
 
-## Validação automatizada em Linux
+```env
+SEED_DEMO_DATA=true
+```
 
-O workflow [`testes-linux.yml`](../.github/workflows/testes-linux.yml) executa no GitHub Actions em `ubuntu-24.04`. Ele inicia um PostgreSQL temporário e roda `npm ci`, a geração do cliente Prisma, a compilação TypeScript e o teste de jornada (`npm run test:journey`). O teste de jornada cria e remove um schema temporário próprio.
+Depois execute `npm run db:seed`. O seed cria contas de demonstração, organização, contrato, lote, equipamentos e referências fictícias. Ele não cria administrador. Reexecutá-lo pode redefinir senha e papel das contas demo; não o execute em banco produtivo.
 
-A compatibilidade automatizada com Linux fica confirmada quando uma execução desse workflow termina com sucesso (check verde) na aba **Actions** do GitHub. O workflow está configurado, e a validação no runner Linux foi apresentada como concluída.
-## Compatibilidade e encerramento
+## Operação e recuperação de tarefas assíncronas
 
-A atividade AV3 solicita compatibilidade com Windows 10 ou superior e Ubuntu 24.04.03 ou superior (incluindo distribuições derivadas). O servidor trata `SIGINT` e `SIGTERM`: fecha o Fastify para novas conexões, aguarda requisições em andamento e então desconecta o Prisma.
+O Redis do Compose usa AOF (`appendonly yes`), política `noeviction` e volume nomeado. Um job aguardando foi testado através de reinício controlado do Redis: o AOF preservou a tarefa e um worker voltou a processá-la. Durante indisponibilidade do Redis, novas solicitações podem falhar temporariamente. Se a tarefa já foi persistida, o parceiro pode repetir a solicitação com a mesma `Idempotency-Key` para tentar enfileirá-la novamente.
 
-## Autoria
+Inspecione ou reinicie serviços sem remover os volumes:
 
-Desenvolvido por **Lavínia Martins** como parte da atividade AV3 de Técnicas de Programação I, evoluindo a base da AV2.
+```powershell
+docker compose ps -a
+docker compose logs --tail 100 redis api worker
+docker compose restart worker
+docker compose restart redis
+```
+
+Depois da recuperação, aguarde Redis em estado `healthy`, confira os logs do worker e consulte `consultarStatus` com a chave da própria organização. Uma tarefa em `FALHA` exige novo pedido e nova chave de idempotência. Não use `docker compose down -v` como procedimento de recuperação.
+
+O worker processa duas tarefas simultaneamente por padrão (`ANALYTICS_WORKER_CONCURRENCY`). Jobs concluídos são retidos no Redis por até 24 horas (limite de 1.000); jobs falhos, até 7 dias (limite de 5.000). O histórico de negócio dos pedidos concluídos fica em PostgreSQL.
+
+## Documentos relacionados
+
+- [Referência de endpoints, autenticação e exemplos](API.md)
+- [Relatório técnico: arquitetura, decisões, métricas e limites](DECISOES_TECNICAS.md)

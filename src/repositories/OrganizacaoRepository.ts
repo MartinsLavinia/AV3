@@ -54,23 +54,24 @@ export class OrganizacaoRepository {
   async excluir(id: string, versao: number) {
     try {
       return await prisma.$transaction(async (tx) => {
-      const atual = await tx.organizacao.findUnique({ where: { id }, include: { contrato: { select: { id: true } }, _count: { select: { lotes: true } } } });
+      const atual = await tx.organizacao.findUnique({ where: { id }, include: { contrato: { select: { id: true } }, _count: { select: { lotes: true, chavesApi: true } } } });
       if (!atual) throw new OrganizacaoNaoEncontradaRepositoryError();
       if (atual.versao !== versao) throw new VersaoOrganizacaoConflitanteRepositoryError();
       const contratos = atual.contrato ? 1 : 0;
-      if (atual._count.lotes > 0 || contratos > 0) {
-        throw new OrganizacaoComVinculosRepositoryError(atual._count.lotes, contratos);
+      if (atual._count.lotes > 0 || contratos > 0 || atual._count.chavesApi > 0) {
+        throw new OrganizacaoComVinculosRepositoryError(atual._count.lotes, contratos, atual._count.chavesApi);
       }
       const resultado = await tx.organizacao.deleteMany({ where: { id, versao } });
       if (resultado.count !== 1) throw new VersaoOrganizacaoConflitanteRepositoryError();
       });
     } catch (erro) {
       if (erro instanceof Prisma.PrismaClientKnownRequestError && erro.code === "P2003") {
-        const [lotes, contrato] = await Promise.all([
+        const [lotes, contrato, chavesApi] = await Promise.all([
           prisma.lote.count({ where: { organizacaoId: id } }),
           prisma.contrato.findUnique({ where: { organizacaoId: id }, select: { id: true } }),
+          prisma.chaveApiParceiro.count({ where: { organizacaoId: id } }),
         ]);
-        throw new OrganizacaoComVinculosRepositoryError(lotes, contrato ? 1 : 0);
+        throw new OrganizacaoComVinculosRepositoryError(lotes, contrato ? 1 : 0, chavesApi);
       }
       throw erro;
     }
@@ -80,5 +81,5 @@ export class OrganizacaoRepository {
 export class OrganizacaoNaoEncontradaRepositoryError extends Error {}
 export class VersaoOrganizacaoConflitanteRepositoryError extends Error {}
 export class OrganizacaoComVinculosRepositoryError extends Error {
-  constructor(public readonly lotes: number, public readonly contratos: number) { super(); }
+  constructor(public readonly lotes: number, public readonly contratos: number, public readonly chavesApi: number = 0) { super(); }
 }

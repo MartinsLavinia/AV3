@@ -64,6 +64,12 @@ enum TipoRelatorioAnalitico {
   VIDA_UTIL_REMANESCENTE
 }
 
+enum EscopoChaveApi {
+  RASTREAMENTO_LEITURA
+  LOTES_CRIACAO
+  RELATORIOS_LEITURA
+}
+
 // ================================
 // ORGANIZACAO
 // ================================
@@ -80,8 +86,33 @@ model Organizacao {
   ativo             Boolean  @default(true)
   versao            Int      @default(1)
 
-  contrato Contrato?
-  lotes    Lote[]
+  contrato    Contrato?
+  lotes       Lote[]
+  chavesApi   ChaveApiParceiro[]
+  tarefasAnaliticas TarefaAnalitica[]
+}
+
+// Credencial de integração externa. O segredo em texto puro nunca é persistido.
+model ChaveApiParceiro {
+  id                  String          @id @default(uuid()) @db.Uuid
+  organizacaoId       String          @db.Uuid
+  nome                String
+  prefixo             String
+  segredoHash         String          @unique
+  permissoes          EscopoChaveApi[] @default([])
+  criadaPor           String
+  criadaEm            DateTime        @default(now())
+  expiraEm            DateTime
+  ultimaUtilizacaoEm  DateTime?
+  revogadaEm          DateTime?
+  revogadaPor         String?
+  motivoRevogacao     String?
+
+  organizacao Organizacao @relation(fields: [organizacaoId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  tarefasAnaliticas TarefaAnalitica[]
+
+  @@index([organizacaoId, criadaEm])
+  @@index([organizacaoId, revogadaEm, expiraEm])
 }
 
 // ================================
@@ -227,9 +258,44 @@ model ExecucaoAnalitica {
   resultado          Json
   referenciasUsadas  Json?
   solicitadoPor      String?
+  tarefaId           String?                @unique @db.Uuid
+
+  tarefa TarefaAnalitica? @relation(fields: [tarefaId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@index([tipo, geradoEm])
   @@index([periodoInicio, periodoFim])
+}
+
+enum StatusTarefaAnalitica {
+  AGUARDANDO
+  PROCESSANDO
+  CONCLUIDA
+  FALHA
+}
+
+// Ciclo de vida de solicitações analíticas recebidas pela API e processadas via BullMQ.
+model TarefaAnalitica {
+  id                  String                @id @default(uuid()) @db.Uuid
+  organizacaoId       String                @db.Uuid
+  chaveApiId          String                @db.Uuid
+  tipo                TipoRelatorioAnalitico
+  status              StatusTarefaAnalitica @default(AGUARDANDO)
+  chaveIdempotencia   String
+  hashRequisicao      String
+  parametros          Json?
+  tentativas          Int                   @default(0)
+  erro                String?
+  criadaEm            DateTime              @default(now())
+  iniciadaEm          DateTime?
+  concluidaEm         DateTime?
+
+  organizacao Organizacao @relation(fields: [organizacaoId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  chaveApi ChaveApiParceiro @relation(fields: [chaveApiId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  execucao ExecucaoAnalitica?
+
+  @@unique([organizacaoId, chaveIdempotencia])
+  @@index([organizacaoId, criadaEm])
+  @@index([status, criadaEm])
 }
 
 // ================================

@@ -3,11 +3,11 @@ import { AuditoriaRepository, type FiltroHistorico } from "../repositories/Audit
 export class AuditoriaService {
   constructor(private readonly auditoria = new AuditoriaRepository()) {}
 
-  async rastrearEquipamento(identificador: string) {
+  async rastrearEquipamento(identificador: string, organizacaoId?: string) {
     if (typeof identificador !== "string" || !identificador.trim()) {
       throw new ErroValidacaoAuditoria("Informe o ID ou código de barras do equipamento.");
     }
-    const equipamento = await this.auditoria.rastrearEquipamento(identificador.trim());
+    const equipamento = await this.auditoria.rastrearEquipamento(identificador.trim(), organizacaoId);
     if (!equipamento) throw new EquipamentoRastreadoNaoEncontradoError();
     return equipamento;
   }

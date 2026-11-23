@@ -78,7 +78,7 @@ export class OrganizacaoController {
       if (erro instanceof ErroValidacaoOrganizacao) return reply.code(400).send({ mensagem: erro.message });
       if (erro instanceof OrganizacaoNaoEncontradaError) return reply.code(404).send({ mensagem: "Organização não encontrada." });
       if (erro instanceof VersaoOrganizacaoConflitanteError) return reply.code(409).send({ mensagem: "A organização foi alterada. Consulte a versão atual antes de excluir." });
-      if (erro instanceof OrganizacaoComVinculosError) return reply.code(409).send({ mensagem: `Não é possível excluir: a organização possui ${erro.lotes} lote(s) e ${erro.contratos} contrato(s) vinculado(s).` });
+      if (erro instanceof OrganizacaoComVinculosError) return reply.code(409).send({ mensagem: `Não é possível excluir: a organização possui ${erro.lotes} lote(s), ${erro.contratos} contrato(s) e ${erro.chavesApi} chave(s) de API vinculados.` });
       requestLog(erro);
       return reply.code(500).send({ mensagem: "Não foi possível excluir a organização." });
     }
